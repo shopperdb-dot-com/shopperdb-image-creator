@@ -115,7 +115,7 @@ The boot partition is auto-detected by looking for a FAT volume containing `cmdl
 
 Run `./create-image.sh --help` for the full option list.
 
-**Saved defaults:** After each successful run the script saves all settings to `.create-image.defaults.json` (gitignored, shared with `create-image.ps1`). On the next run, non-sensitive values are restored automatically; the WiFi password, GitHub PAT, and registration secret are stored AES-256 encrypted (key derived from the machine UUID and local username) and reused silently. Saved credentials from a different machine cannot be decrypted — you will be warned and prompted to re-enter. Pass any option explicitly to override and update the saved value.
+**Saved defaults:** After each successful run the script saves all settings to `.create-image.defaults.json` (gitignored, shared with `create-image.ps1`). On the next run, non-sensitive values are restored automatically; the WiFi password, GitHub PAT, and registration secret are stored AES-256 encrypted (key derived from the machine UUID and local username) and reused silently. Saved credentials from a different machine cannot be decrypted - you will be warned and prompted to re-enter. Pass any option explicitly to override and update the saved value.
 
 **Key options:**
 
