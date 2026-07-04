@@ -1,0 +1,55 @@
+# station.conf - First-boot configuration for inventory client stations
+#
+# Place this file on the SD card's boot partition before first insertion:
+#   /boot/firmware/station.conf  (verify path with: findmnt /boot/firmware)
+#
+# The shopperdb-setup service reads this file on first boot to configure
+# git credentials, clone the repo, run provisioning, and register with
+# the server. Sensitive fields are zeroed after successful setup.
+#
+# This file is NOT checked into the repo. Use station.conf.example
+# as the template.
+
+# REQUIRED - Server registration secret (from server .env)
+REGISTRATION_SECRET=
+
+# REQUIRED - Server URL for initial registration (pre-VPN, LAN or public)
+SERVER_URL=
+
+# REQUIRED - GitHub fine-grained PAT with read-only Contents access to shopperdb
+# Create at: GitHub > Settings > Developer Settings > Personal Access Tokens > Fine-grained tokens
+GITHUB_PAT=
+
+# OPTIONAL - Admin SSH public key for passwordless login (recommended)
+# Paste the full contents of your admin public key (e.g. ~/.ssh/id_ed25519.pub)
+# This key is added to authorized_keys and password auth is disabled afterwards.
+# Without this, password authentication remains active on the station.
+ADMIN_SSH_KEY=
+
+# OPTIONAL - Store page display name for this Pi's public inventory page.
+# If set, a store page is auto-created when the admin accepts the station.
+# Leave blank if this station should not have a public store page.
+STORE_NAME=
+
+# OPTIONAL - Set to true to prevent a public store page from being created
+# for this station. Useful for internal/test deployments. Default: false.
+SKIP_STORE_CREATE=false
+
+# OPTIONAL - Set to true to skip the printer test label during first provisioning.
+# Useful if the label printer is not yet connected or you want to verify the
+# rest of setup before printing. Default: false.
+SKIP_TEST_PRINT=false
+
+# OPTIONAL - WiFi credentials (leave blank for Ethernet-only deployments)
+WIFI_SSID=
+WIFI_PASSWORD=
+WIFI_COUNTRY=US
+
+# OPTIONAL - Static IP (leave blank for DHCP, which is the default)
+# Applies to whichever interface is active (WiFi if WIFI_SSID is set,
+# Ethernet otherwise). Common prefix lengths: 24 = 255.255.255.0,
+# 16 = 255.255.0.0
+STATIC_IP=
+STATIC_GATEWAY=
+STATIC_PREFIX=24
+STATIC_DNS=8.8.8.8,1.1.1.1

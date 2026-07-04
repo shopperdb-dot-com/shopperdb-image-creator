@@ -1,0 +1,46 @@
+# .pre-commit-config.yaml
+# Install:  uv run pre-commit install
+# Run all:  uv run pre-commit run --all-files
+
+repos:
+  # ── Linting ────────────────────────────────────────────────────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.14
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+        types_or: [python]
+      - id: ruff-format
+        types_or: [python]
+
+  # ── Shell script checks ────────────────────────────────────────────
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+        args: [--severity=warning, --shell=bash]
+        files: '\.(sh|bash)$'
+
+  # ── General file hygiene ───────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$'
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+        exclude: 'package-lock\.json$'
+      - id: check-merge-conflict
+      - id: detect-private-key
+        exclude: '(provision\.conf|\.env)'
+
+  # ── Image creator tests ────────────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: image-creator-tests
+        name: image-creator pytest
+        entry: uv run --group test pytest tests/ -x -q --tb=short
+        language: system
+        pass_filenames: false
+        types_or: [python, bash, sh]

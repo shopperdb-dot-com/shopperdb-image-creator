@@ -1,0 +1,16 @@
+# Force LF line endings for all shell scripts (they run on Linux)
+*.sh text eol=lf
+*.bash text eol=lf
+station.conf text eol=lf
+
+# Keep Windows scripts with CRLF
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+
+# Sensible defaults
+*.py text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.json text eol=lf

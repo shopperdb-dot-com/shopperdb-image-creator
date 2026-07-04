@@ -1,0 +1,53 @@
+# Environment (keep .env.example as template)
+.env
+*.log
+.claude/
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Testing / Coverage
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Station config (written to SD card boot partition - may contain secrets)
+station.conf
+
+# Saved defaults for create-image scripts (may contain DPAPI-encrypted secrets)
+.create-image.defaults.json
+.create-image.defaults

@@ -1,0 +1,32 @@
+[project]
+name = "shopperdb-image-creator"
+version = "0.1.0"
+description = "SD card preparation tool for shopperdb Pi stations"
+requires-python = ">=3.14"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "bash: tests that run bash scripts via subprocess (Linux/macOS only)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501", "E402"]
+
+[dependency-groups]
+test = [
+    "pytest>=8.0",
+]
+dev = [
+    "ruff>=0.15",
+    "pre-commit>=3.7",
+]
