@@ -340,7 +340,141 @@ find_boot_mount() {
     return 1
 }
 
-# ── Step 1: Flash image (full mode only) ──────────────────────────────────────
+# ── Step 1: Collect and validate all inputs (before flashing or writing) ──────
+# Everything the image needs is gathered and checked HERE FIRST, so a bad value
+# (mis-pasted PAT, wrong secret, missing SSH key) fails now - before minutes are
+# spent flashing the card. Steps 2+ only write; they no longer prompt.
+
+printf '\n'
+printf "${CYAN}================================================${NC}\n"
+printf "${CYAN}  Step 1: Configuration${NC}\n"
+printf "${CYAN}================================================${NC}\n"
+printf '\n'
+
+# GitHub PAT - used to clone the private repo on the Pi and to fetch the admin hash.
+if [[ -z "$GITHUB_PAT" ]]; then
+    _was_explicit GithubPat && fail "GITHUB_PAT is required."
+    _saved_github_pat_plain=$(decrypt_value "$_SAVED_GITHUB_PAT_ENC")
+    if [[ -n "$_saved_github_pat_plain" ]]; then
+        GITHUB_PAT="$_saved_github_pat_plain"
+        ok "GitHub PAT: using saved value"
+    else
+        [[ -n "$_SAVED_GITHUB_PAT_ENC" ]] && warn "Saved GitHub PAT cannot be decrypted (saved on a different machine) - please re-enter"
+        GITHUB_PAT=$(read_secure "GitHub PAT (shopperdb-fleet-deploy, read-only Contents)")
+    fi
+fi
+[[ -n "$GITHUB_PAT" ]] || fail "GITHUB_PAT is required."
+[[ "$GITHUB_PAT" == ghp_* || "$GITHUB_PAT" == github_pat_* ]] || warn "PAT does not look like a GitHub token (expected ghp_ or github_pat_ prefix)"
+
+# Verify the token can actually read the private repo NOW, so a mis-pasted or
+# wrong-scope PAT is caught here instead of on the Pi's first-boot clone.
+step "Verifying the GitHub token can read shopperdb..."
+if git ls-remote "https://x-access-token:${GITHUB_PAT}@github.com/shopperdb-admin/shopperdb.git" HEAD >/dev/null 2>&1; then
+    ok "GitHub PAT: validated (repo is readable)"
+else
+    fail "GitHub PAT cannot read shopperdb-admin/shopperdb (bad token, wrong scope, or no network). Re-run and re-enter the token."
+fi
+
+# Admin password hash (full mode only - baked into firstrun.sh). Local file, or
+# fetched from the private repo with the now-validated PAT.
+if $FULL_MODE; then
+    ADMIN_PW_HASH=""
+    _admin_hash_file="$SCRIPT_DIR/admin_password.hash"
+    if [[ ! -f "$_admin_hash_file" ]]; then
+        _admin_hash_file="$(cd "$SCRIPT_DIR/.." && pwd)/shopperdb/client/scripts/admin_password.hash"
+    fi
+    if [[ -f "$_admin_hash_file" ]]; then
+        ADMIN_PW_HASH=$(tr -d '[:space:]' < "$_admin_hash_file")
+        ok "Admin password: loaded from $(basename "$_admin_hash_file")"
+    else
+        step "Admin password hash not found locally - fetching from shopperdb repo..."
+        ADMIN_PW_HASH=$(curl -fsSL \
+            -H "Authorization: Bearer $GITHUB_PAT" \
+            -H "Accept: application/vnd.github.raw+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/shopperdb-admin/shopperdb/contents/client/scripts/admin_password.hash" \
+            2>/dev/null | tr -d '[:space:]') || true
+        if [[ -n "$ADMIN_PW_HASH" ]]; then
+            ok "Admin password: fetched from shopperdb repo"
+        else
+            fail "Could not load admin_password.hash - local file not found and GitHub fetch failed. Ensure the GitHub PAT has read access to shopperdb."
+        fi
+    fi
+    if [[ ! "$ADMIN_PW_HASH" =~ ^\$6\$[a-zA-Z0-9./]{1,16}\$[a-zA-Z0-9./]{86}$ ]]; then
+        fail "admin_password.hash does not contain a valid SHA-512 crypt hash (expected: \$6\$<1-16 char salt>\$<86 char hash>)."
+    fi
+fi
+
+# Server URL (default derived from this host's LAN IP)
+if [[ -z "$SERVER_URL" ]]; then
+    default_url=""
+    if [[ "$OS_TYPE" == "Darwin" ]]; then
+        local_ip=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)
+    else
+        local_ip=$(ip route get 1 2>/dev/null | awk '/src/{print $7; exit}' || \
+                   hostname -I 2>/dev/null | awk '{print $1}' || true)
+    fi
+    [[ -n "${local_ip:-}" ]] && default_url="http://${local_ip}:8000"
+    SERVER_URL=$(prompt_line "Server URL" "$default_url")
+fi
+[[ -n "$SERVER_URL" ]] || fail "SERVER_URL is required."
+ok "Server URL: $SERVER_URL"
+
+# Registration secret
+if [[ -z "$REGISTRATION_SECRET" ]]; then
+    _was_explicit RegistrationSecret && fail "REGISTRATION_SECRET is required."
+    _saved_reg_plain=$(decrypt_value "$_SAVED_REG_SEC_ENC")
+    if [[ -n "$_saved_reg_plain" ]]; then
+        REGISTRATION_SECRET="$_saved_reg_plain"
+        ok "Registration secret: using saved value"
+    else
+        [[ -n "$_SAVED_REG_SEC_ENC" ]] && warn "Saved registration secret cannot be decrypted (saved on a different machine) - please re-enter"
+        REGISTRATION_SECRET=$(read_secure "Registration secret (from server configuration)")
+    fi
+fi
+[[ -n "$REGISTRATION_SECRET" ]] || fail "REGISTRATION_SECRET is required."
+ok "Registration secret: provided"
+
+# Admin SSH public key (optional - enables passwordless SSH, disables password auth)
+ADMIN_SSH_KEY=""
+if [[ -n "$ADMIN_SSH_KEY_PATH" && -f "$ADMIN_SSH_KEY_PATH" ]]; then
+    key_content=$(cat "$ADMIN_SSH_KEY_PATH")
+    if [[ "$key_content" == ssh-* ]]; then
+        ADMIN_SSH_KEY="$key_content"
+        ok "Admin SSH key: $ADMIN_SSH_KEY_PATH"
+    else
+        warn "Not an SSH public key: $ADMIN_SSH_KEY_PATH"
+    fi
+elif [[ -n "$ADMIN_SSH_KEY_PATH" ]]; then
+    warn "Admin SSH key not found: $ADMIN_SSH_KEY_PATH - password auth remains active"
+fi
+
+# Store display name (optional)
+if [[ -z "$STORE_NAME" ]] && ! _was_explicit StoreName; then
+    STORE_NAME=$(prompt_line "Store display name (optional - Enter to skip)" "")
+fi
+if [[ -n "$STORE_NAME" ]]; then
+    ok "Store name: $STORE_NAME"
+else
+    ok "Store name: (none - no public store page)"
+fi
+
+# WiFi password (only when a secured WiFi SSID is configured)
+if [[ -n "$WIFI_SSID" && "$WIFI_SECURITY" != "open" && -z "$WIFI_PASSWORD" ]]; then
+    _saved_wifi_pw_plain=$(decrypt_value "$_SAVED_WIFI_PW_ENC")
+    if [[ -n "$_saved_wifi_pw_plain" ]]; then
+        WIFI_PASSWORD="$_saved_wifi_pw_plain"
+        ok "WiFi password: using saved value"
+    else
+        WIFI_PASSWORD=$(read_secure "WiFi password for '$WIFI_SSID'")
+        wifi_pw_confirm=$(read_secure "Confirm WiFi password for '$WIFI_SSID'")
+        [[ "$WIFI_PASSWORD" == "$wifi_pw_confirm" ]] || fail "WiFi passwords do not match."
+    fi
+fi
+
+ok "All inputs collected and validated - nothing is written until now"
+
+# ── Step 2: Flash image (full mode only) ──────────────────────────────────────
 
 if $FULL_MODE && [[ "$SKIP_FLASH" != "true" ]]; then
     [[ -f "$IMAGE_PATH" ]] || fail "Image file not found: $IMAGE_PATH"
@@ -467,7 +601,7 @@ if $FULL_MODE && [[ "$SKIP_FLASH" != "true" ]]; then
     ok "Boot partition: $BOOT_MOUNT"
 fi  # end if FULL_MODE && ! SKIP_FLASH
 
-# ── Step 2: Find boot partition (provision-only mode) ─────────────────────────
+# ── Step 3: Find/mount boot partition ─────────────────────────────────────────
 
 if [[ -z "$BOOT_MOUNT" ]]; then
     step "Looking for boot partition (label 'bootfs')..."
@@ -483,73 +617,10 @@ fi
 
 [[ -d "$BOOT_MOUNT" ]] || fail "Boot mount path not found: $BOOT_MOUNT"
 
-# ── Step 3: Credentials and firstrun.sh (full mode only) ─────────────────────
+# ── Step 4: Write firstrun.sh (full mode only) ───────────────────────────────
+# All credentials/inputs were collected and validated in Step 1.
 
 if $FULL_MODE; then
-    printf '\n'
-    printf "${CYAN}================================================${NC}\n"
-    printf "${CYAN}  Step 3: Enter credentials for the Pi image${NC}\n"
-    printf "${CYAN}================================================${NC}\n"
-    printf '\n'
-
-    # Resolve the GitHub PAT early - needed to fetch the admin password hash.
-    # In provision-only mode the PAT is resolved later in Step 4 instead.
-    if [[ -z "$GITHUB_PAT" ]]; then
-        _was_explicit GithubPat && fail "GITHUB_PAT is required."
-        _saved_github_pat_plain=$(decrypt_value "$_SAVED_GITHUB_PAT_ENC")
-        if [[ -n "$_saved_github_pat_plain" ]]; then
-            GITHUB_PAT="$_saved_github_pat_plain"
-            ok "GitHub PAT: using saved value"
-        else
-            [[ -n "$_SAVED_GITHUB_PAT_ENC" ]] && warn "Saved GitHub PAT cannot be decrypted (saved on a different machine) - please re-enter"
-            GITHUB_PAT=$(read_secure "GitHub PAT (inventory-fleet-deploy, read-only Contents)")
-        fi
-    fi
-    [[ -n "$GITHUB_PAT" ]] || fail "GITHUB_PAT is required."
-    [[ "$GITHUB_PAT" == ghp_* || "$GITHUB_PAT" == github_pat_* ]] || warn "PAT does not look like a GitHub token (expected ghp_ or github_pat_ prefix)"
-    ok "GitHub PAT: provided"
-
-    # Admin password hash - read from local file or fetched from the private repo.
-    # The hash is never stored in the public image-creator repo; the private
-    # shopperdb repo is the authoritative source for fleet-wide rotation.
-    ADMIN_PW_HASH=""
-    _admin_hash_file="$SCRIPT_DIR/admin_password.hash"
-    if [[ ! -f "$_admin_hash_file" ]]; then
-        _admin_hash_file="$(cd "$SCRIPT_DIR/.." && pwd)/shopperdb/client/scripts/admin_password.hash"
-    fi
-    if [[ -f "$_admin_hash_file" ]]; then
-        ADMIN_PW_HASH=$(tr -d '[:space:]' < "$_admin_hash_file")
-        ok "Admin password: loaded from $(basename "$_admin_hash_file")"
-    else
-        step "Admin password hash not found locally - fetching from shopperdb repo..."
-        ADMIN_PW_HASH=$(curl -fsSL \
-            -H "Authorization: Bearer $GITHUB_PAT" \
-            -H "Accept: application/vnd.github.raw+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/shopperdb-admin/shopperdb/contents/client/scripts/admin_password.hash" \
-            2>/dev/null | tr -d '[:space:]') || true
-        if [[ -n "$ADMIN_PW_HASH" ]]; then
-            ok "Admin password: fetched from shopperdb repo"
-        else
-            fail "Could not load admin_password.hash - local file not found and GitHub fetch failed. Ensure the GitHub PAT has read access to shopperdb."
-        fi
-    fi
-    if [[ ! "$ADMIN_PW_HASH" =~ ^\$6\$[a-zA-Z0-9./]{1,16}\$[a-zA-Z0-9./]{86}$ ]]; then
-        fail "admin_password.hash does not contain a valid SHA-512 crypt hash (expected: \$6\$<1-16 char salt>\$<86 char hash>)."
-    fi
-
-    if [[ -n "$WIFI_SSID" && "$WIFI_SECURITY" != "open" && -z "$WIFI_PASSWORD" ]]; then
-        _saved_wifi_pw_plain=$(decrypt_value "$_SAVED_WIFI_PW_ENC")
-        if [[ -n "$_saved_wifi_pw_plain" ]]; then
-            WIFI_PASSWORD="$_saved_wifi_pw_plain"
-            ok "WiFi password: using saved value"
-        else
-            WIFI_PASSWORD=$(read_secure "WiFi password for '$WIFI_SSID'")
-            wifi_pw_confirm=$(read_secure "Confirm WiFi password for '$WIFI_SSID'")
-            [[ "$WIFI_PASSWORD" == "$wifi_pw_confirm" ]] || fail "WiFi passwords do not match."
-        fi
-    fi
-
     wifi_hidden_int=0
     [[ "$WIFI_HIDDEN" == "true" ]] && wifi_hidden_int=1
 
@@ -812,83 +883,8 @@ PYEOF
     fi
 fi
 
-# ── Step 4: station.conf ────────────────────────────────────────────────────
-
-if [[ -z "$SERVER_URL" ]]; then
-    default_url=""
-    if [[ "$OS_TYPE" == "Darwin" ]]; then
-        local_ip=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)
-    else
-        local_ip=$(ip route get 1 2>/dev/null | awk '/src/{print $7; exit}' || \
-                   hostname -I 2>/dev/null | awk '{print $1}' || true)
-    fi
-    [[ -n "${local_ip:-}" ]] && default_url="http://${local_ip}:8000"
-    SERVER_URL=$(prompt_line "Server URL" "$default_url")
-fi
-[[ -n "$SERVER_URL" ]] || fail "SERVER_URL is required."
-ok "Server URL: $SERVER_URL"
-
-if [[ -z "$REGISTRATION_SECRET" ]]; then
-    _was_explicit RegistrationSecret && fail "REGISTRATION_SECRET is required."
-    _saved_reg_plain=$(decrypt_value "$_SAVED_REG_SEC_ENC")
-    if [[ -n "$_saved_reg_plain" ]]; then
-        REGISTRATION_SECRET="$_saved_reg_plain"
-        ok "Registration secret: using saved value"
-    else
-        [[ -n "$_SAVED_REG_SEC_ENC" ]] && warn "Saved registration secret cannot be decrypted (saved on a different machine) - please re-enter"
-        REGISTRATION_SECRET=$(read_secure "Registration secret (from server configuration)")
-    fi
-fi
-[[ -n "$REGISTRATION_SECRET" ]] || fail "REGISTRATION_SECRET is required."
-
-if [[ -z "$GITHUB_PAT" ]]; then
-    _was_explicit GithubPat && fail "GITHUB_PAT is required."
-    _saved_github_pat_plain=$(decrypt_value "$_SAVED_GITHUB_PAT_ENC")
-    if [[ -n "$_saved_github_pat_plain" ]]; then
-        GITHUB_PAT="$_saved_github_pat_plain"
-        ok "GitHub PAT: using saved value"
-    else
-        [[ -n "$_SAVED_GITHUB_PAT_ENC" ]] && warn "Saved GitHub PAT cannot be decrypted (saved on a different machine) - please re-enter"
-        GITHUB_PAT=$(read_secure "GitHub PAT (inventory-fleet-deploy, read-only Contents)")
-    fi
-    [[ -n "$GITHUB_PAT" ]] || fail "GITHUB_PAT is required."
-    [[ "$GITHUB_PAT" == ghp_* || "$GITHUB_PAT" == github_pat_* ]] || warn "PAT does not look like a GitHub token (expected ghp_ or github_pat_ prefix)"
-    ok "GitHub PAT: provided"
-fi
-
-ADMIN_SSH_KEY=""
-if [[ -n "$ADMIN_SSH_KEY_PATH" && -f "$ADMIN_SSH_KEY_PATH" ]]; then
-    key_content=$(cat "$ADMIN_SSH_KEY_PATH")
-    if [[ "$key_content" == ssh-* ]]; then
-        ADMIN_SSH_KEY="$key_content"
-        ok "Admin SSH key: $ADMIN_SSH_KEY_PATH"
-    else
-        warn "Not an SSH public key: $ADMIN_SSH_KEY_PATH"
-    fi
-elif [[ -n "$ADMIN_SSH_KEY_PATH" ]]; then
-    warn "Admin SSH key not found: $ADMIN_SSH_KEY_PATH - password auth remains active"
-fi
-
-if [[ -z "$STORE_NAME" ]] && ! _was_explicit StoreName; then
-    STORE_NAME=$(prompt_line "Store display name (optional - Enter to skip)" "")
-fi
-if [[ -n "$STORE_NAME" ]]; then
-    ok "Store name: $STORE_NAME"
-else
-    ok "Store name: (none - no public store page)"
-fi
-
-if [[ -n "$WIFI_SSID" && "$WIFI_SECURITY" != "open" && -z "$WIFI_PASSWORD" ]]; then
-    _saved_wifi_pw_plain=$(decrypt_value "$_SAVED_WIFI_PW_ENC")
-    if [[ -n "$_saved_wifi_pw_plain" ]]; then
-        WIFI_PASSWORD="$_saved_wifi_pw_plain"
-        ok "WiFi password: using saved value"
-    else
-        WIFI_PASSWORD=$(read_secure "WiFi password for '$WIFI_SSID'")
-        wifi_pw_confirm=$(read_secure "Confirm WiFi password for '$WIFI_SSID'")
-        [[ "$WIFI_PASSWORD" == "$wifi_pw_confirm" ]] || fail "WiFi passwords do not match."
-    fi
-fi
+# ── Step 5: Write station.conf ───────────────────────────────────────────────
+# All inputs were collected and validated in Step 1.
 
 out_file="$BOOT_MOUNT/station.conf"
 step "Writing station.conf to $out_file..."
