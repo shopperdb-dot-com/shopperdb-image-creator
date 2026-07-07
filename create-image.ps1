@@ -88,6 +88,12 @@
     Skip the printer test label during first provisioning. Default: $false.
     This flag is never cached - omitting it always means false regardless of previous runs.
 
+.PARAMETER LcdDisplay
+    Configure a 7-inch 1024x600 HDMI LCD on first boot. Default: $false.
+    The Pi detects its own model on first boot and applies the matching HDMI/USB
+    power settings. Build a dedicated image with this flag; do not use it for
+    TV or headless units. This flag is never cached.
+
 .PARAMETER SkipFlash
     Skip flashing; write firstrun.sh and station.conf to an already-flashed SD card.
     The boot partition must already be mounted and visible as a drive letter.
@@ -141,6 +147,7 @@ param(
     [string]$StoreName,
     [switch]$SkipStoreCreate,
     [switch]$SkipTestPrint,
+    [switch]$LcdDisplay,
     [string]$StaticIp,
     [string]$StaticGateway,
     [string]$StaticPrefix = "24",
@@ -1026,6 +1033,7 @@ $wifiPassLine   = if ($WifiPassword) { "WIFI_PASSWORD='$WifiPassword'" }  else {
 $storeNameLine  = if ($StoreName)    { "STORE_NAME=`"${StoreName}`"" }    else { "STORE_NAME=" }
 $skipStoreLine    = "SKIP_STORE_CREATE=" + ($SkipStoreCreate.ToString().ToLower())
 $skipPrintLine    = "SKIP_TEST_PRINT="   + ($SkipTestPrint.ToString().ToLower())
+$lcdDisplayLine   = "LCD_DISPLAY="       + ($LcdDisplay.ToString().ToLower())
 
 Step "Writing station.conf to $outFile..."
 
@@ -1048,6 +1056,10 @@ $adminLine
 $storeNameLine
 $skipStoreLine
 $skipPrintLine
+
+# OPTIONAL - Configure a 7-inch 1024x600 HDMI LCD on first boot.
+# The Pi detects its own model and applies the matching HDMI/USB settings.
+$lcdDisplayLine
 
 # OPTIONAL - WiFi (leave blank for Ethernet-only)
 WIFI_SSID=$WifiSsid

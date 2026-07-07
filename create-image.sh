@@ -126,6 +126,7 @@ ADMIN_SSH_KEY_PATH="$HOME/.ssh/id_ed25519.pub"
 STORE_NAME=""
 SKIP_STORE_CREATE="false"
 SKIP_TEST_PRINT="false"
+LCD_DISPLAY="false"
 SKIP_FLASH="false"
 
 STATIC_IP=""
@@ -165,6 +166,10 @@ Usage: ./create-image.sh [options]
                              If set, a public store page is created when the admin accepts the station.
   --skip-store-create        Suppress public store page creation (default: off)
   --skip-test-print          Skip printer test label during first provisioning run (default: off)
+  --lcd-display              Configure a 7-inch 1024x600 HDMI LCD (default: off)
+                             The Pi detects its own model on first boot and writes
+                             the matching HDMI/USB power settings. Build a dedicated
+                             image with this flag; do not use it for TV/headless units.
 
   --skip-flash               Skip flashing; write firstrun.sh and station.conf to an already-flashed SD card
 
@@ -211,6 +216,7 @@ while [[ $# -gt 0 ]]; do
         --store-name)          STORE_NAME="$2";    _explicit+=(StoreName);         shift 2 ;;
         --skip-store-create)   SKIP_STORE_CREATE="true"; _explicit+=(SkipStoreCreate); shift ;;
         --skip-test-print)     SKIP_TEST_PRINT="true"; _explicit+=(SkipTestPrint); shift   ;;
+        --lcd-display)         LCD_DISPLAY="true";     _explicit+=(LcdDisplay);     shift   ;;
         --skip-flash)          SKIP_FLASH="true";                                   shift   ;;
         --reset-defaults)      RESET_DEFAULTS="true";                               shift   ;;
         --static-ip)           STATIC_IP="$2";     _explicit+=(StaticIp);          shift 2 ;;
@@ -913,6 +919,10 @@ step "Writing station.conf to $out_file..."
     fi
     printf 'SKIP_STORE_CREATE=%s\n' "$SKIP_STORE_CREATE"
     printf 'SKIP_TEST_PRINT=%s\n' "$SKIP_TEST_PRINT"
+    printf '\n'
+    printf '# OPTIONAL - Configure a 7-inch 1024x600 HDMI LCD on first boot.\n'
+    printf '# The Pi detects its own model and applies the matching HDMI/USB settings.\n'
+    printf 'LCD_DISPLAY=%s\n' "$LCD_DISPLAY"
     printf '\n'
     printf '# OPTIONAL - WiFi (leave blank for Ethernet-only)\n'
     printf 'WIFI_SSID=%s\n' "$WIFI_SSID"

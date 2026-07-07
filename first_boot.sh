@@ -82,6 +82,74 @@ fix_owner() {
     chown -R "${PI_USER}:${PI_USER}" "$@" 2>/dev/null || true
 }
 
+# Configure a 7-inch 1024x600 HDMI LCD, tailored to the detected board.
+# Detection uses the same /proc/device-tree/model string reported to the
+# server at registration (e.g. "Raspberry Pi 5 Model B Rev 1.0").
+# Settings are written to the boot partition and take effect on next reboot.
+configure_lcd_display() {
+    local cmdline_file="/boot/firmware/cmdline.txt"
+    local config_file="/boot/firmware/config.txt"
+    # KMS video= line: force 1024x600 on the primary HDMI connector. HDMI-A-1
+    # is the primary HDMI port on Pi 3/4/5 and Zero. The trailing D forces the
+    # digital output on even when the panel provides no/garbage EDID (the KMS
+    # equivalent of the legacy hdmi_force_hotplug/hdmi_cvt config.txt block,
+    # which is ignored under the KMS driver used on Bookworm and Trixie).
+    local video_arg="video=HDMI-A-1:1024x600M@60D"
+    local model
+
+    model=$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo "")
+
+    case "$model" in
+        *"Raspberry Pi"*) ;;
+        *)
+            warn "LCD_DISPLAY set but hardware is not a Raspberry Pi (${model:-unknown}) - skipping LCD config"
+            return 0
+            ;;
+    esac
+
+    info "Detected board: ${model}"
+
+    # HDMI mode: append the forced mode only if no video= entry exists yet.
+    if [ -f "$cmdline_file" ]; then
+        local cmdline
+        cmdline=$(tr -d '\r\n' < "$cmdline_file")
+        if printf '%s' "$cmdline" | grep -q "video=HDMI"; then
+            info "cmdline.txt already has a video= entry - leaving HDMI mode unchanged"
+        else
+            printf '%s %s\n' "$cmdline" "$video_arg" | sudo tee "$cmdline_file" >/dev/null
+            ok "HDMI mode set: ${video_arg}"
+        fi
+    else
+        warn "cmdline.txt not found at ${cmdline_file} - cannot set HDMI mode"
+    fi
+
+    # USB power depends on the board's power delivery:
+    #  - Pi 4/5: USB-C power negotiation; the legacy max_usb_current knob is
+    #    ignored and the ports already supply enough for a bus-powered panel.
+    #  - Pi 3/2/Zero: micro-USB; max_usb_current=1 raises the USB budget to
+    #    1.2A (needs a 2.5A+ supply) so a bus-powered panel does not brown out.
+    case "$model" in
+        *"Raspberry Pi 5"*|*"Raspberry Pi 4"*)
+            info "USB-C power board - max_usb_current not required"
+            ;;
+        *)
+            if [ -f "$config_file" ]; then
+                if grep -q "^max_usb_current=1" "$config_file"; then
+                    info "config.txt already sets max_usb_current=1"
+                else
+                    printf '\n# 7-inch LCD: raise USB budget to 1.2A for a bus-powered panel\nmax_usb_current=1\n' \
+                        | sudo tee -a "$config_file" >/dev/null
+                    ok "max_usb_current=1 added to config.txt"
+                fi
+            else
+                warn "config.txt not found at ${config_file} - cannot set USB power"
+            fi
+            ;;
+    esac
+
+    warn "LCD settings take effect on the next reboot"
+}
+
 # =====================================================================
 # FLAG FILE CHECK - exit immediately if not a first boot
 # =====================================================================
@@ -131,6 +199,7 @@ REGISTRATION_SECRET="${REGISTRATION_SECRET:-}"
 SERVER_URL="${SERVER_URL:-}"
 GITHUB_PAT="${GITHUB_PAT:-}"
 ADMIN_SSH_KEY="${ADMIN_SSH_KEY:-}"
+LCD_DISPLAY="${LCD_DISPLAY:-false}"
 
 missing=()
 [ -z "$REGISTRATION_SECRET" ] && missing+=("REGISTRATION_SECRET")
@@ -151,6 +220,13 @@ if [ -n "$ADMIN_SSH_KEY" ]; then
     info "Admin SSH key provided - will configure authorized_keys"
 else
     warn "No ADMIN_SSH_KEY in station.conf - password auth will remain active"
+fi
+
+# Optional: configure a 7-inch HDMI LCD, tailored to the detected board.
+if [ "$LCD_DISPLAY" = "true" ]; then
+    log ""
+    log -e "${CYAN}Configuring 7-inch LCD display${NC}"
+    configure_lcd_display
 fi
 
 # =====================================================================

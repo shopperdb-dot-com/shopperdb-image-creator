@@ -40,6 +40,14 @@ SKIP_STORE_CREATE=false
 # rest of setup before printing. Default: false.
 SKIP_TEST_PRINT=false
 
+# OPTIONAL - Set to true to configure a 7-inch 1024x600 HDMI LCD on first boot.
+# The Pi detects its own model (via /proc/device-tree/model) and applies the
+# matching HDMI mode and USB power settings. Only enable this on units that
+# actually have the LCD attached; it forces a 1024x600 HDMI mode that is wrong
+# for a TV or headless station. Takes effect on the reboot after first boot.
+# Default: false.
+LCD_DISPLAY=false
+
 # OPTIONAL - WiFi credentials (leave blank for Ethernet-only deployments)
 WIFI_SSID=
 WIFI_PASSWORD=

@@ -52,6 +52,10 @@ class TestProvisionConfExample:
         for field in ("STATIC_IP", "STATIC_GATEWAY", "STATIC_PREFIX", "STATIC_DNS"):
             assert field in content, f"Static IP field {field} missing from station.conf.example"
 
+    def test_lcd_display_field_present_and_defaults_false(self):
+        content = STATION_CONF_EXAMPLE.read_text()
+        assert "LCD_DISPLAY=false" in content, "LCD_DISPLAY missing or not defaulted to false in station.conf.example"
+
     def test_required_fields_are_blank(self):
         """Template must ship with empty values - no accidental secrets committed."""
         content = STATION_CONF_EXAMPLE.read_text()
@@ -107,6 +111,43 @@ class TestFirstBootSh:
         assert "x-access-token:" in content, (
             "first_boot.sh must use https://x-access-token:TOKEN@github.com format for git credentials"
         )
+
+    def test_lcd_config_uses_device_tree_model_detection(self):
+        """The LCD config must detect the board with the same /proc/device-tree/model
+        method used for server registration, and gate on a Raspberry Pi match.
+        """
+        content = FIRST_BOOT_SH.read_text()
+        assert "configure_lcd_display" in content, "first_boot.sh missing configure_lcd_display function"
+        assert "/proc/device-tree/model" in content, (
+            "first_boot.sh LCD config must read /proc/device-tree/model to detect the board"
+        )
+
+    def test_lcd_config_is_model_aware_for_usb_power(self):
+        """Pi 4/5 (USB-C) must be handled separately from older micro-USB boards
+        so max_usb_current is only applied where it is meaningful.
+        """
+        content = FIRST_BOOT_SH.read_text()
+        assert "Raspberry Pi 5" in content and "Raspberry Pi 4" in content, (
+            "first_boot.sh LCD config must branch on Pi 4/5 vs older boards"
+        )
+        assert "max_usb_current=1" in content, "first_boot.sh LCD config must set max_usb_current on micro-USB boards"
+
+    def test_lcd_config_uses_kms_video_cmdline(self):
+        """The forced HDMI mode must use the KMS video= cmdline mechanism, which is
+        what actually applies on Bookworm/Trixie (legacy hdmi_* config.txt is ignored).
+        """
+        content = FIRST_BOOT_SH.read_text()
+        assert "video=HDMI-A-1:1024x600M@60D" in content, (
+            "first_boot.sh LCD config must set the KMS video= mode for the 1024x600 panel"
+        )
+
+    def test_lcd_config_gated_on_station_conf_flag(self):
+        """LCD config must only run when LCD_DISPLAY=true is set in station.conf."""
+        content = FIRST_BOOT_SH.read_text()
+        assert 'LCD_DISPLAY="${LCD_DISPLAY:-false}"' in content, (
+            "first_boot.sh must read LCD_DISPLAY from station.conf with a false default"
+        )
+        assert 'if [ "$LCD_DISPLAY" = "true" ]' in content, "first_boot.sh must gate LCD config on LCD_DISPLAY=true"
 
     def test_explicit_chown_after_fix_owner(self):
         """first_boot.sh must explicitly chown the credentials file when running as root.
@@ -357,6 +398,25 @@ class TestProvisionOnly:
         conf_text = (boot / "station.conf").read_text()
         assert "SKIP_STORE_CREATE=true" in conf_text
         assert "SKIP_TEST_PRINT=true" in conf_text
+
+    def test_lcd_display_flag_written_to_station_conf(self, tmp_path):
+        boot = tmp_path / "bootfs"
+        boot.mkdir()
+        (boot / "cmdline.txt").write_text("root=/dev/mmcblk0p2\n")
+        subprocess.run(
+            self._base_args(boot) + ["--lcd-display"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert "LCD_DISPLAY=true" in (boot / "station.conf").read_text()
+
+    def test_lcd_display_defaults_false_in_station_conf(self, tmp_path):
+        boot = tmp_path / "bootfs"
+        boot.mkdir()
+        (boot / "cmdline.txt").write_text("root=/dev/mmcblk0p2\n")
+        subprocess.run(self._base_args(boot), capture_output=True, text=True, timeout=30)
+        assert "LCD_DISPLAY=false" in (boot / "station.conf").read_text()
 
     def test_encrypted_credentials_saved_to_defaults(self, tmp_path):
         """Sensitive values are AES-encrypted and written to the defaults file after a run."""

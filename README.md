@@ -87,6 +87,7 @@ Run `Get-Help .\create-image.ps1 -Full` for all parameters.
 | `-StoreName` | *(saved or blank = none)* | Store display name, e.g. `"Steve's Wheels and Deals"` - creates a public store page when the admin accepts the station. Saved between runs; pass `""` to clear. |
 | `-SkipStoreCreate` | `$false` | Suppress public store page creation (for internal/test deployments) |
 | `-SkipTestPrint` | `$false` | Skip printer test label on first provisioning run (useful before the printer is connected) |
+| `-LcdDisplay` | `$false` | Configure a 7-inch 1024x600 HDMI LCD. The Pi detects its own model on first boot and applies the matching HDMI/USB settings. Use only for units with the LCD attached, not TV/headless. |
 | `-StaticIp` | *(blank = DHCP)* | Optional static IP for the Pi |
 | `-DiskNumber` | *(auto-detected)* | Override SD card disk number from `Get-Disk` |
 
@@ -134,6 +135,7 @@ Run `./create-image.sh --help` for the full option list.
 | `--store-name NAME` | *(saved or blank = none)* | Store display name - creates a public store page when the admin accepts the station. Saved between runs. |
 | `--skip-store-create` | *(off)* | Suppress public store page creation |
 | `--skip-test-print` | *(off)* | Skip printer test label on first provisioning run |
+| `--lcd-display` | *(off)* | Configure a 7-inch 1024x600 HDMI LCD. The Pi detects its own model on first boot and applies the matching HDMI/USB settings. Use only for units with the LCD attached, not TV/headless. |
 | `--static-ip IP` | *(blank = DHCP)* | Optional static IP for the Pi |
 
 ---
