@@ -1082,7 +1082,7 @@ $lcdDisplayLine   = "LCD_DISPLAY="       + ($LcdDisplay.ToString().ToLower())
 Step "Writing station.conf to $outFile..."
 
 $conf = @"
-# station.conf - First-boot configuration for inventory client station
+# station.conf - First-boot configuration for ShopperDB client station
 # Written by create-image.ps1
 #
 # Sensitive fields are zeroed automatically after successful first boot.
