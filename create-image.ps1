@@ -510,7 +510,157 @@ if ($fullMode -and -not $SkipFlash) {
     }
 }
 
-# ── Step 1: Flash the image (full mode only) ──────────────────────────────────
+# ── Step 1: Collect and validate all inputs (before flashing or writing) ──────
+# Everything the image needs is gathered and checked HERE FIRST, so a bad value
+# (mis-pasted PAT, wrong secret, missing SSH key) fails now - before minutes are
+# spent flashing the card. Later steps only write; they no longer prompt.
+
+Write-Host ""
+Write-Host "================================================" -ForegroundColor Cyan
+Write-Host "  Step 1: Configuration" -ForegroundColor Cyan
+Write-Host "================================================" -ForegroundColor Cyan
+Write-Host ""
+
+# GitHub PAT - used to clone the private repo on the Pi and to fetch the admin hash.
+if (-not $GithubPat) {
+    $savedPat = Unprotect-Value $_savedGithubPatEnc
+    if ($savedPat) {
+        $GithubPat = $savedPat
+        Ok "GitHub PAT: using saved value"
+    } else {
+        if ($_savedGithubPatEnc) { Warn "Saved GitHub PAT could not be decrypted (saved on another machine) - please re-enter" }
+        $GithubPat = Read-Secure "GitHub PAT (shopperdb-fleet-deploy, read-only Contents)"
+    }
+}
+if (-not $GithubPat) { Fail "GITHUB_PAT is required." }
+if ($GithubPat -notmatch "^ghp_|^github_pat_") { Warn "PAT does not look like a GitHub token (expected ghp_ or github_pat_ prefix)" }
+
+# Verify the token can actually read the private repo NOW, so a mis-pasted or
+# wrong-scope PAT is caught here instead of on the Pi's first-boot clone. Only
+# when about to flash - the whole point is to fail before the slow, destructive
+# write. Provision-only / -SkipFlash runs write station.conf without the check.
+if ($fullMode -and -not $SkipFlash) {
+    Step "Verifying the GitHub token can read shopperdb..."
+    $env:GIT_TERMINAL_PROMPT = "0"
+    $lsOk = $false
+    try {
+        & git ls-remote "https://x-access-token:$GithubPat@github.com/shopperdb-admin/shopperdb.git" HEAD 2>&1 | Out-Null
+        $lsOk = ($LASTEXITCODE -eq 0)
+    } catch { $lsOk = $false }
+    Remove-Item Env:\GIT_TERMINAL_PROMPT -ErrorAction SilentlyContinue
+    if ($lsOk) {
+        Ok "GitHub PAT: validated (repo is readable)"
+    } else {
+        Fail "GitHub PAT cannot read shopperdb-admin/shopperdb (bad token, wrong scope, git missing, or no network). Re-run and re-enter the token."
+    }
+} else {
+    Ok "GitHub PAT: provided"
+}
+
+# Admin password hash (full mode only - baked into firstrun.sh). Local file, or
+# fetched from the private repo with the now-validated PAT.
+if ($fullMode) {
+    $AdminPwHash   = ""
+    $adminHashFile = Join-Path $PSScriptRoot "admin_password.hash"
+    if (-not (Test-Path $adminHashFile)) {
+        # Fall back to the sibling shopperdb repo if both are checked out together
+        $adminHashFile = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\shopperdb\client\scripts\admin_password.hash"))
+    }
+    if (Test-Path $adminHashFile) {
+        $AdminPwHash = (Get-Content $adminHashFile -Raw).Trim()
+        Ok "Admin password: loaded from $(Split-Path $adminHashFile -Leaf)"
+    } else {
+        Step "Admin password hash not found locally - fetching from shopperdb repo..."
+        try {
+            $resp = Invoke-WebRequest -UseBasicParsing `
+                -Uri "https://api.github.com/repos/shopperdb-admin/shopperdb/contents/client/scripts/admin_password.hash" `
+                -Headers @{
+                    Authorization          = "Bearer $GithubPat"
+                    Accept                 = "application/vnd.github.raw+json"
+                    "X-GitHub-Api-Version" = "2022-11-28"
+                } -ErrorAction Stop
+            $AdminPwHash = ($resp.Content -replace '\s', '')
+        } catch { $AdminPwHash = "" }
+        if ($AdminPwHash) {
+            Ok "Admin password: fetched from shopperdb repo"
+        } else {
+            Fail "Could not load admin_password.hash - local file not found and GitHub fetch failed. Ensure the GitHub PAT has read access to shopperdb."
+        }
+    }
+    if ($AdminPwHash -notmatch '^\$6\$[a-zA-Z0-9./]{1,16}\$[a-zA-Z0-9./]{86}$') {
+        Fail "admin_password.hash does not contain a valid SHA-512 crypt hash (expected: `$6`$<1-16 char salt>`$<86 char hash>)."
+    }
+}
+
+# Server URL - saved config, then auto-detect + prompt
+if (-not $ServerUrl) {
+    $defaultUrl = ""
+    $localIp = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.IPAddress -notmatch "^(127\.|169\.254\.)" -and
+            $_.PrefixOrigin -in @("Dhcp","Manual") -and
+            $_.InterfaceAlias -notmatch "^(vEthernet|Loopback|Tunnel|isatap|Teredo)"
+        } |
+        Select-Object -First 1 -ExpandProperty IPAddress
+    if ($localIp) { $defaultUrl = "http://${localIp}:8000" }
+    $urlPrompt  = if ($defaultUrl) { "Server URL [$defaultUrl]" } else { "Server URL (e.g. http://192.168.2.100:8000)" }
+    $urlEntered = (Read-Host $urlPrompt).Trim()
+    $ServerUrl  = if ($urlEntered) { $urlEntered } else { $defaultUrl }
+}
+if (-not $ServerUrl) { Fail "SERVER_URL is required." }
+Ok "Server URL: $ServerUrl"
+
+# Registration secret - saved fallback, then prompt
+if (-not $RegistrationSecret) {
+    $savedReg = Unprotect-Value $_savedRegSecEnc
+    if ($savedReg) {
+        $RegistrationSecret = $savedReg
+        Ok "Registration secret: using saved value"
+    } else {
+        if ($_savedRegSecEnc) { Warn "Saved registration secret could not be decrypted (saved on another machine) - please re-enter" }
+        $RegistrationSecret = Read-Secure "Registration secret (from server configuration)"
+    }
+}
+if (-not $RegistrationSecret) { Fail "REGISTRATION_SECRET is required." }
+Ok "Registration secret: provided"
+
+# Admin SSH public key (optional - enables passwordless SSH, disables password auth)
+$adminSshKey = ""
+if ($AdminSshKeyPath -ne "" -and (Test-Path $AdminSshKeyPath -ErrorAction SilentlyContinue)) {
+    $adminSshKey = (Get-Content $AdminSshKeyPath -Raw).Trim()
+    if ($adminSshKey -notmatch "^ssh-") {
+        Warn "Not an SSH public key: $AdminSshKeyPath"
+        $adminSshKey = ""
+    } else {
+        Ok "Admin SSH key: $AdminSshKeyPath"
+    }
+} elseif ($AdminSshKeyPath -ne "") {
+    Warn "Admin SSH key not found: $AdminSshKeyPath - password auth remains active"
+}
+
+# Store display name (optional)
+if (-not $_explicitParams.Contains('StoreName') -and -not $StoreName) {
+    $entered = (Read-Host "Store display name (optional - Enter to skip)").Trim()
+    if ($entered) { $StoreName = $entered }
+}
+if ($StoreName) { Ok "Store name: $StoreName" } else { Ok "Store name: (none - no public store page)" }
+
+# WiFi password (only when a secured WiFi SSID is configured) - collected once here
+if ($WifiSsid -and $WifiSecurity -ne "open" -and -not $WifiPassword) {
+    $savedWifiPw = Unprotect-Value $_savedWifiPwEnc
+    if ($savedWifiPw) {
+        $WifiPassword = $savedWifiPw
+        Ok "WiFi password: using saved value"
+    } else {
+        $WifiPassword = Read-Secure "WiFi password for '$WifiSsid'"
+        $wifiConfirm  = Read-Secure "Confirm WiFi password for '$WifiSsid'"
+        if ($WifiPassword -ne $wifiConfirm) { Fail "WiFi passwords do not match." }
+    }
+}
+
+Ok "All inputs collected and validated - nothing is written until now"
+
+# ── Step 2: Flash the image (full mode only) ──────────────────────────────────
 
 if ($fullMode -and -not $SkipFlash) {
     if (-not (Test-Path $ImagePath)) { Fail "Image file not found: $ImagePath" }
@@ -637,7 +787,7 @@ if ($fullMode -and -not $SkipFlash) {
     Ok "Boot partition: ${Drive}: (bootfs)"
 }
 
-# ── Step 2: Find boot partition (provision-only mode) ─────────────────────────
+# ── Step 3: Find boot partition ───────────────────────────────────────────────
 
 if (-not $Drive) {
     Step "Looking for boot partition (FAT32, label 'bootfs')..."
@@ -672,45 +822,10 @@ $Drive    = $Drive.TrimEnd(':')
 $bootPath = "${Drive}:"
 if (-not (Test-Path $bootPath)) { Fail "Drive ${bootPath} not found." }
 
-# ── Step 3: Collect passwords and generate firstrun.sh (full mode only) ───────
+# ── Step 4: Write firstrun.sh (full mode only) ───────────────────────────────
+# All credentials/inputs were collected and validated in Step 1.
 
 if ($fullMode) {
-    Write-Host ""
-    Write-Host "================================================" -ForegroundColor Cyan
-    Write-Host "  Step 3: Collect credentials for the Pi image" -ForegroundColor Cyan
-    Write-Host "================================================" -ForegroundColor Cyan
-    Write-Host ""
-
-    # Admin password hash - read from committed file, embedded in firstrun.sh.
-    # firstrun.sh runs as root on Boot 1, so no sudo is needed to apply it.
-    # Rotation is handled by update.sh reading admin_password.hash from the repo.
-    $adminHashFile = Join-Path $PSScriptRoot "admin_password.hash"
-    if (-not (Test-Path $adminHashFile)) {
-        # Fall back to the sibling shopperdb repo if both are checked out together
-        $adminHashFile = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\shopperdb\client\scripts\admin_password.hash"))
-    }
-    if (-not (Test-Path $adminHashFile)) {
-        Fail "admin_password.hash not found.`nExpected: $PSScriptRoot\admin_password.hash`nGenerate with: printf '%s' 'password' | uv run python hash_password.py > admin_password.hash"
-    }
-    $AdminPwHash = (Get-Content $adminHashFile -Raw).Trim()
-    if ($AdminPwHash -notmatch '^\$6\$[a-zA-Z0-9./]{1,16}\$[a-zA-Z0-9./]{86}$') {
-        Fail "admin_password.hash does not contain a valid SHA-512 crypt hash (expected: `$6`$<1-16 char salt>`$<86 char hash>)."
-    }
-    Ok "Admin password: loaded from $(Split-Path $adminHashFile -Leaf)"
-
-    if ($WifiSsid -and $WifiSecurity -ne "open" -and -not $WifiPassword) {
-        if ($_savedWifiPwEnc -and -not $_explicitParams.Contains('WifiPassword')) {
-            $WifiPassword = Unprotect-Value $_savedWifiPwEnc
-        } else {
-            $savedWifiPw  = Unprotect-Value $_savedWifiPwEnc
-            $WifiPassword = Read-DefaultSecure "WiFi password for '$WifiSsid'" $_savedWifiPwEnc
-            if ($WifiPassword -ne $savedWifiPw) {
-                $wifiConfirm = Read-Secure "Confirm WiFi password for '$WifiSsid'"
-                if ($WifiPassword -ne $wifiConfirm) { Fail "WiFi passwords do not match." }
-            }
-        }
-    }
-
     # Build the WiFi block. imager_custom set_wpa takes <ssid> <password> <country> (3 args).
     # scan_ssid=1 is needed for hidden networks in the wpa_supplicant fallback path.
     $wifiHiddenInt = if ($WifiHidden) { "1" } else { "0" }
@@ -951,79 +1066,8 @@ exit 0
     }
 }
 
-# ── Step 4: station.conf ────────────────────────────────────────────────────
-
-# Server URL - saved config, then auto-detect + prompt
-if (-not $ServerUrl) {
-    $defaultUrl = ""
-    $localIp = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.IPAddress -notmatch "^(127\.|169\.254\.)" -and
-            $_.PrefixOrigin -in @("Dhcp","Manual") -and
-            $_.InterfaceAlias -notmatch "^(vEthernet|Loopback|Tunnel|isatap|Teredo)"
-        } |
-        Select-Object -First 1 -ExpandProperty IPAddress
-    if ($localIp) { $defaultUrl = "http://${localIp}:8000" }
-    $urlPrompt  = if ($defaultUrl) { "Server URL [$defaultUrl]" } else { "Server URL (e.g. http://192.168.2.100:8000)" }
-    $urlEntered = (Read-Host $urlPrompt).Trim()
-    $ServerUrl  = if ($urlEntered) { $urlEntered } else { $defaultUrl }
-}
-if (-not $ServerUrl) { Fail "SERVER_URL is required." }
-Ok "Server URL: $ServerUrl"
-
-# Registration secret - saved fallback, then prompt
-if (-not $RegistrationSecret) {
-    if ($_savedRegSecEnc -and -not $_explicitParams.Contains('RegistrationSecret')) {
-        $RegistrationSecret = Unprotect-Value $_savedRegSecEnc
-        if ($RegistrationSecret) { Ok "Registration secret: using saved value" }
-    }
-}
-if (-not $RegistrationSecret) {
-    $RegistrationSecret = Read-DefaultSecure "Registration secret (provided by server administrator)" $null
-}
-if (-not $RegistrationSecret) { Fail "REGISTRATION_SECRET is required." }
-
-# GitHub PAT
-if (-not $GithubPat) {
-    if ($_savedGithubPatEnc -and -not $_explicitParams.Contains('GithubPat')) {
-        $GithubPat = Unprotect-Value $_savedGithubPatEnc
-    } else {
-        $GithubPat = Read-DefaultSecure "GitHub PAT (inventory-fleet-deploy, read-only Contents)" $_savedGithubPatEnc
-    }
-}
-if (-not $GithubPat) { Fail "GITHUB_PAT is required." }
-if ($GithubPat -notmatch "^ghp_|^github_pat_") { Warn "PAT does not look like a GitHub token (expected ghp_ or github_pat_ prefix)" }
-Ok "GitHub PAT: provided"
-
-# Admin SSH public key
-$adminSshKey = ""
-if ($AdminSshKeyPath -ne "" -and (Test-Path $AdminSshKeyPath -ErrorAction SilentlyContinue)) {
-    $adminSshKey = (Get-Content $AdminSshKeyPath -Raw).Trim()
-    if ($adminSshKey -notmatch "^ssh-") {
-        Warn "Not an SSH public key: $AdminSshKeyPath"
-        $adminSshKey = ""
-    } else {
-        Ok "Admin SSH key: $AdminSshKeyPath"
-    }
-} elseif ($AdminSshKeyPath -ne "") {
-    Warn "Admin SSH key not found: $AdminSshKeyPath - password auth remains active"
-}
-
-# Store name (optional) - prompt only when no saved value and not passed explicitly
-if (-not $_explicitParams.Contains('StoreName') -and -not $StoreName) {
-    $entered = (Read-Host "Store display name (optional - Enter to skip)").Trim()
-    if ($entered) { $StoreName = $entered }
-}
-if ($StoreName) { Ok "Store name: $StoreName" } else { Ok "Store name: (none - no public store page)" }
-
-# WiFi password for station.conf (may already be set from firstrun.sh step)
-if ($WifiSsid -and $WifiSecurity -ne "open" -and -not $WifiPassword) {
-    if ($_savedWifiPwEnc -and -not $_explicitParams.Contains('WifiPassword')) {
-        $WifiPassword = Unprotect-Value $_savedWifiPwEnc
-    } else {
-        $WifiPassword = Read-DefaultSecure "WiFi password for '$WifiSsid'" $_savedWifiPwEnc
-    }
-}
+# ── Step 5: Write station.conf ───────────────────────────────────────────────
+# All inputs were collected and validated in Step 1.
 
 # Write station.conf
 $outFile        = Join-Path $bootPath "station.conf"
