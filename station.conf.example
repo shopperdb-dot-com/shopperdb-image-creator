@@ -1,4 +1,4 @@
-# station.conf - First-boot configuration for inventory client stations
+# station.conf - First-boot configuration for ShopperDB client stations
 #
 # Place this file on the SD card's boot partition before first insertion:
 #   /boot/firmware/station.conf  (verify path with: findmnt /boot/firmware)

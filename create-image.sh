@@ -902,7 +902,7 @@ step "Writing station.conf to $out_file..."
 [[ -n "$WIFI_PASSWORD" ]] && wifi_pass_line="WIFI_PASSWORD='$WIFI_PASSWORD'" || wifi_pass_line="WIFI_PASSWORD="
 
 {
-    printf '# station.conf - First-boot configuration for inventory client station\n'
+    printf '# station.conf - First-boot configuration for ShopperDB client station\n'
     printf '# Written %s by create-image.sh\n' "$(date '+%Y-%m-%d %H:%M')"
     printf '#\n'
     printf '# Sensitive fields are zeroed automatically after successful first boot.\n'
