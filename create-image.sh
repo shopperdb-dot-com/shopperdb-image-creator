@@ -69,13 +69,17 @@ get_machine_key() {
     printf '%s:%s' "${machine_id:-no-machine-id}" "$user_id"
 }
 
+# NOTE: -A keeps the base64 on a single line for BOTH encode and decode. Without
+# it, OpenSSL 3.x writes wrapped base64 and then refuses to decode the flattened
+# single-line value on the next run ("error reading input file"), so a saved
+# credential never decrypts and always looks like it was "saved on another
+# machine". -A must be present on encrypt and decrypt together.
 encrypt_value() {
     local plain="$1"
     if [[ -z "$plain" ]]; then printf ''; return; fi
     printf '%s' "$plain" \
         | openssl enc -aes-256-cbc -md sha256 \
-            -pass pass:"$(get_machine_key)" -base64 2>/dev/null \
-        | tr -d '\n' \
+            -pass pass:"$(get_machine_key)" -base64 -A 2>/dev/null \
         || true
 }
 
@@ -84,7 +88,7 @@ decrypt_value() {
     if [[ -z "$enc" ]]; then printf ''; return; fi
     printf '%s' "$enc" \
         | openssl enc -d -aes-256-cbc -md sha256 \
-            -pass pass:"$(get_machine_key)" -base64 2>/dev/null \
+            -pass pass:"$(get_machine_key)" -base64 -A 2>/dev/null \
         || true
 }
 
@@ -368,11 +372,16 @@ fi
 
 # Verify the token can actually read the private repo NOW, so a mis-pasted or
 # wrong-scope PAT is caught here instead of on the Pi's first-boot clone.
-step "Verifying the GitHub token can read shopperdb..."
-if git ls-remote "https://x-access-token:${GITHUB_PAT}@github.com/shopperdb-admin/shopperdb.git" HEAD >/dev/null 2>&1; then
-    ok "GitHub PAT: validated (repo is readable)"
-else
-    fail "GitHub PAT cannot read shopperdb-admin/shopperdb (bad token, wrong scope, or no network). Re-run and re-enter the token."
+# Only when we are about to flash - the whole point is to fail before the slow,
+# destructive write. Provision-only / --skip-flash runs (and offline use) write
+# station.conf without the network check.
+if $FULL_MODE && [[ "$SKIP_FLASH" != "true" ]]; then
+    step "Verifying the GitHub token can read shopperdb..."
+    if git ls-remote "https://x-access-token:${GITHUB_PAT}@github.com/shopperdb-admin/shopperdb.git" HEAD >/dev/null 2>&1; then
+        ok "GitHub PAT: validated (repo is readable)"
+    else
+        fail "GitHub PAT cannot read shopperdb-admin/shopperdb (bad token, wrong scope, or no network). Re-run and re-enter the token."
+    fi
 fi
 
 # Admin password hash (full mode only - baked into firstrun.sh). Local file, or
