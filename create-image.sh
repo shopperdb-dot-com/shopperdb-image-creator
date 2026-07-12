@@ -377,10 +377,10 @@ fi
 # station.conf without the network check.
 if $FULL_MODE && [[ "$SKIP_FLASH" != "true" ]]; then
     step "Verifying the GitHub token can read shopperdb..."
-    if git ls-remote "https://x-access-token:${GITHUB_PAT}@github.com/shopperdb-admin/shopperdb.git" HEAD >/dev/null 2>&1; then
+    if git ls-remote "https://x-access-token:${GITHUB_PAT}@github.com/shopperdb-dot-com/shopperdb.git" HEAD >/dev/null 2>&1; then
         ok "GitHub PAT: validated (repo is readable)"
     else
-        fail "GitHub PAT cannot read shopperdb-admin/shopperdb (bad token, wrong scope, or no network). Re-run and re-enter the token."
+        fail "GitHub PAT cannot read shopperdb-dot-com/shopperdb (bad token, wrong scope, or no network). Re-run and re-enter the token."
     fi
 fi
 
@@ -401,7 +401,7 @@ if $FULL_MODE; then
             -H "Authorization: Bearer $GITHUB_PAT" \
             -H "Accept: application/vnd.github.raw+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/shopperdb-admin/shopperdb/contents/client/scripts/admin_password.hash" \
+            "https://api.github.com/repos/shopperdb-dot-com/shopperdb/contents/client/scripts/admin_password.hash" \
             2>/dev/null | tr -d '[:space:]') || true
         if [[ -n "$ADMIN_PW_HASH" ]]; then
             ok "Admin password: fetched from shopperdb repo"
