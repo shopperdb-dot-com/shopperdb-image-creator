@@ -544,14 +544,14 @@ if ($fullMode -and -not $SkipFlash) {
     $env:GIT_TERMINAL_PROMPT = "0"
     $lsOk = $false
     try {
-        & git ls-remote "https://x-access-token:$GithubPat@github.com/shopperdb-admin/shopperdb.git" HEAD 2>&1 | Out-Null
+        & git ls-remote "https://x-access-token:$GithubPat@github.com/shopperdb-dot-com/shopperdb.git" HEAD 2>&1 | Out-Null
         $lsOk = ($LASTEXITCODE -eq 0)
     } catch { $lsOk = $false }
     Remove-Item Env:\GIT_TERMINAL_PROMPT -ErrorAction SilentlyContinue
     if ($lsOk) {
         Ok "GitHub PAT: validated (repo is readable)"
     } else {
-        Fail "GitHub PAT cannot read shopperdb-admin/shopperdb (bad token, wrong scope, git missing, or no network). Re-run and re-enter the token."
+        Fail "GitHub PAT cannot read shopperdb-dot-com/shopperdb (bad token, wrong scope, git missing, or no network). Re-run and re-enter the token."
     }
 } else {
     Ok "GitHub PAT: provided"
@@ -573,7 +573,7 @@ if ($fullMode) {
         Step "Admin password hash not found locally - fetching from shopperdb repo..."
         try {
             $resp = Invoke-WebRequest -UseBasicParsing `
-                -Uri "https://api.github.com/repos/shopperdb-admin/shopperdb/contents/client/scripts/admin_password.hash" `
+                -Uri "https://api.github.com/repos/shopperdb-dot-com/shopperdb/contents/client/scripts/admin_password.hash" `
                 -Headers @{
                     Authorization          = "Bearer $GithubPat"
                     Accept                 = "application/vnd.github.raw+json"

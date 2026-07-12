@@ -48,7 +48,7 @@ fi
 LOG_FILE="${PI_HOME}/first-boot.log"
 REPO_DIR="${PI_HOME}/shopperdb"
 CLIENT_DIR="${REPO_DIR}/client"
-GITHUB_REPO="https://github.com/shopperdb-admin/shopperdb.git"
+GITHUB_REPO="https://github.com/shopperdb-dot-com/shopperdb.git"
 SERVICE_NAME="shopperdb-setup"
 
 # Colors
