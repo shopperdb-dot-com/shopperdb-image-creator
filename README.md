@@ -1,5 +1,7 @@
 # shopperdb-image-creator
 
+[![CI](https://github.com/shopperdb-dot-com/shopperdb-image-creator/actions/workflows/ci.yml/badge.svg)](https://github.com/shopperdb-dot-com/shopperdb-image-creator/actions/workflows/ci.yml)
+
 SD card preparation tool for deploying shopperdb stations on Raspberry Pi.
 
 Handles the full workflow - flash a base OS image, customise it, and write `station.conf` to the boot partition - without opening Raspberry Pi Imager manually. Works with the private `shopperdb` repository.
