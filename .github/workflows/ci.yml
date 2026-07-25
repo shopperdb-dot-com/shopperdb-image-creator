@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up uv + Python
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.14"
+          enable-cache: true
+      - name: Lint Python (ruff)
+        run: uv run ruff check .
+      - name: Lint shell scripts (shellcheck)
+        run: shellcheck --severity=warning --shell=bash create-image.sh first_boot.sh setup.sh
+      - name: Run tests
+        run: uv run --group test pytest -q
+
+  release:
+    name: Tag and publish release
+    needs: [test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Tag and publish the release for this version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(tr -d ' \t\r\n' < VERSION)"
+          tag="v${version}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists - nothing to publish (VERSION was not bumped)."
+            exit 0
+          fi
+          # Pull this version's section out of CHANGELOG.md as the release notes.
+          notes="$(awk -v v="$version" '
+            index($0, "## " v) == 1 { grab = 1; next }
+            grab && /^## / { exit }
+            grab { print }
+          ' CHANGELOG.md)"
+          if [ -z "$(printf '%s' "$notes" | tr -d ' \t\r\n')" ]; then
+            notes="Release $tag"
+          fi
+          printf '%s\n' "$notes" | gh release create "$tag" \
+            --title "$tag" \
+            --target "${{ github.sha }}" \
+            --notes-file -
