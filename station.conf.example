@@ -31,8 +31,22 @@ ADMIN_SSH_KEY=
 # Leave blank if this station should not have a public store page.
 STORE_NAME=
 
+# OPTIONAL - The store's web address, and the city/state it was built from.
+# STORE_SLUG is the label before the domain (e.g. the "acme-hartford-ct" in
+# https://acme-hartford-ct.example.com). The server uses it as given rather than
+# deriving one, so the address is exactly what was approved when the card was
+# written. It is a subdomain name, so it is capped at 63 characters and may hold
+# only lowercase letters, numbers and hyphens.
+#
+# create-image.sh / create-image.ps1 fill these in and have you confirm the
+# address. Leave blank to let the server derive one from STORE_NAME alone.
+STORE_CITY=
+STORE_STATE=
+STORE_SLUG=
+
 # OPTIONAL - Set to true to prevent a public store page from being created
 # for this station. Useful for internal/test deployments. Default: false.
+# When true, the store address fields above are ignored.
 SKIP_STORE_CREATE=false
 
 # OPTIONAL - Set to true to skip the printer test label during first provisioning.

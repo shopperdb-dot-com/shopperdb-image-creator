@@ -1,6 +1,7 @@
 """Tests for provision-image scripts and bundled support files."""
 
 import json
+import shutil
 import stat
 import subprocess
 import sys
@@ -599,3 +600,159 @@ class TestWifiStationConf:
     def test_country_written_to_station_conf(self, tmp_path):
         content = self._run_with_wifi(tmp_path, "MyNetwork", "MyPassword1")
         assert "WIFI_COUNTRY=US" in content
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Store web address (subdomain label)
+# ═════════════════════════════════════════════════════════════════════
+
+CREATE_PS1 = REPO_ROOT / "create-image.ps1"
+
+# name, city, state -> expected address. The same table drives both implementations, so the
+# bash and PowerShell copies cannot drift apart unnoticed.
+SLUG_CASES = [
+    ("Steve's Wheels and Deals", "Watertown", "CT", "steves-wheels-and-deals-watertown-ct"),
+    ("Shop", "", "", "shop"),
+    ("  --Foo & Bar!!  ", "", "", "foo-bar"),
+    ("Cafe Bleu", "Hartford", "CT", "cafe-bleu-hartford-ct"),
+    # Too long: the name is shortened at a word boundary, the city/state tail survives intact.
+    (
+        "Steves Wheels and Deals Automotive Sales and Service Center",
+        "Watertown",
+        "CT",
+        "steves-wheels-and-deals-automotive-sales-and-watertown-ct",
+    ),
+    (
+        "Northern Connecticut Automotive Repair and Tire Service",
+        "New Britain",
+        "CT",
+        "northern-connecticut-automotive-repair-and-tire-new-britain-ct",
+    ),
+]
+
+SLUG_MAX_LENGTH = 63
+
+
+def _slug_via_bash(name, city, state):
+    result = subprocess.run(
+        [
+            "bash",
+            str(CREATE_SH),
+            "--print-slug",
+            "--store-name",
+            name,
+            "--store-city",
+            city,
+            "--store-state",
+            state,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode, result.stdout.strip(), result.stderr.strip()
+
+
+def _slug_via_powershell(name, city, state):
+    result = subprocess.run(
+        [
+            "pwsh",
+            "-NoProfile",
+            "-File",
+            str(CREATE_PS1),
+            "-PrintSlug",
+            "-StoreName",
+            name,
+            "-StoreCity",
+            city,
+            "-StoreState",
+            state,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode, result.stdout.strip(), result.stderr.strip()
+
+
+_HAS_PWSH = shutil.which("pwsh") is not None
+
+
+class TestStoreAddress:
+    """The store address is a DNS label, so it is capped at 63 characters.
+
+    An over-length address produces a store that looks correct everywhere but whose subdomain
+    never resolves, so this is checked before the card is written rather than after.
+    """
+
+    @pytest.mark.bash
+    @pytest.mark.parametrize(("name", "city", "state", "expected"), SLUG_CASES)
+    def test_bash_proposes_expected_address(self, name, city, state, expected):
+        code, out, err = _slug_via_bash(name, city, state)
+        assert code == 0, err
+        assert out == expected
+
+    @pytest.mark.bash
+    def test_bash_proposal_never_exceeds_the_limit(self):
+        code, out, _ = _slug_via_bash("A" * 200, "Watertown", "CT")
+        assert code == 0
+        assert len(out) <= SLUG_MAX_LENGTH
+        assert out.endswith("-watertown-ct")  # the disambiguating tail is preserved
+        assert not out.endswith("-")  # a label may not end in a hyphen
+
+    @pytest.mark.bash
+    @pytest.mark.parametrize("bad", ["www", "admin", "a" * 64, "Upper", "double--hyphen", "-lead"])
+    def test_bash_rejects_invalid_addresses(self, bad):
+        result = subprocess.run(
+            ["bash", str(CREATE_SH), "--print-slug", "--store-name", "x", "--store-slug", bad],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0, f"{bad!r} should have been rejected"
+
+    @pytest.mark.bash
+    def test_bash_print_slug_requires_a_store_name(self):
+        code, _, _ = _slug_via_bash("", "Watertown", "CT")
+        assert code != 0
+
+    @pytest.mark.skipif(not _HAS_PWSH, reason="pwsh not installed")
+    @pytest.mark.parametrize(("name", "city", "state", "expected"), SLUG_CASES)
+    def test_powershell_proposes_expected_address(self, name, city, state, expected):
+        code, out, err = _slug_via_powershell(name, city, state)
+        assert code == 0, err
+        assert out == expected
+
+    @pytest.mark.bash  # needs a real bash; on Windows "bash" resolves to WSL
+    @pytest.mark.skipif(not _HAS_PWSH, reason="pwsh not installed")
+    @pytest.mark.parametrize(("name", "city", "state", "_expected"), SLUG_CASES)
+    def test_both_implementations_agree(self, name, city, state, _expected):
+        """The rules live in three places (server, bash, PowerShell); two of them are checked here.
+
+        Drift between them is the real risk of duplicating the logic, so it is asserted directly
+        rather than assumed.
+        """
+        _, bash_out, _ = _slug_via_bash(name, city, state)
+        _, ps_out, _ = _slug_via_powershell(name, city, state)
+        assert bash_out == ps_out
+
+
+class TestStoreAddressInConf:
+    """station.conf.example and the writers must carry the address fields."""
+
+    @pytest.mark.parametrize("field", ["STORE_CITY", "STORE_STATE", "STORE_SLUG"])
+    def test_example_defines_the_field(self, field):
+        assert f"{field}=" in STATION_CONF_EXAMPLE.read_text()
+
+    @pytest.mark.parametrize("field", ["STORE_CITY", "STORE_STATE", "STORE_SLUG"])
+    def test_bash_writer_emits_the_field(self, field):
+        assert f"{field}=" in CREATE_SH.read_text()
+
+    @pytest.mark.parametrize("field", ["STORE_CITY", "STORE_STATE", "STORE_SLUG"])
+    def test_powershell_writer_emits_the_field(self, field):
+        assert f"{field}=" in CREATE_PS1.read_text()
+
+    def test_address_is_not_saved_between_runs(self):
+        """City/state are remembered; the address is not - it names one store, so reusing it
+        for the next card would collide."""
+        content = CREATE_SH.read_text()
+        assert "_load_saved StoreCity" in content
+        assert "_load_saved StoreState" in content
+        assert "_load_saved StoreSlug" not in content

@@ -87,7 +87,11 @@ Run `Get-Help .\create-image.ps1 -Full` for all parameters.
 | `-GithubPat` | *(prompted)* | GitHub PAT with read-only Contents access to shopperdb |
 | `-AdminSshKeyPath` | `~\.ssh\id_ed25519.pub` | Admin public key (pass `""` to skip) |
 | `-StoreName` | *(saved or blank = none)* | Store display name, e.g. `"Steve's Wheels and Deals"` - creates a public store page when the admin accepts the station. Saved between runs; pass `""` to clear. |
-| `-SkipStoreCreate` | `$false` | Suppress public store page creation (for internal/test deployments) |
+| `-StoreCity` | *(saved or blank)* | Store city - part of the store's web address. Prompted for when a store name is set. |
+| `-StoreState` | *(saved or blank)* | Store state, 2 letters - part of the store's web address. |
+| `-StoreSlug` | *(confirmed at the prompt)* | The store's web address label. Pass to set it outright and skip the confirmation prompt. Max 63 characters. |
+| `-PrintSlug` | *(off)* | Print the proposed store address and exit, without touching a card. |
+| `-SkipStoreCreate` | `$false` | Suppress public store page creation (for internal/test deployments). Skips the address prompts. |
 | `-SkipTestPrint` | `$false` | Skip printer test label on first provisioning run (useful before the printer is connected) |
 | `-LcdDisplay` | `$false` | Configure a 7-inch 1024x600 HDMI LCD. The Pi detects its own model on first boot and applies the matching HDMI/USB settings. Use only for units with the LCD attached, not TV/headless. |
 | `-StaticIp` | *(blank = DHCP)* | Optional static IP for the Pi |
@@ -135,7 +139,11 @@ Run `./create-image.sh --help` for the full option list.
 | `--github-pat TOKEN` | *(prompted)* | GitHub PAT with read-only Contents access to shopperdb |
 | `--admin-ssh-key PATH` | `~/.ssh/id_ed25519.pub` | Admin public key (pass `""` to skip) |
 | `--store-name NAME` | *(saved or blank = none)* | Store display name - creates a public store page when the admin accepts the station. Saved between runs. |
-| `--skip-store-create` | *(off)* | Suppress public store page creation |
+| `--store-city CITY` | *(saved or blank)* | Store city - part of the store's web address |
+| `--store-state ST` | *(saved or blank)* | Store state, 2 letters - part of the store's web address |
+| `--store-slug SLUG` | *(confirmed at the prompt)* | The store's web address label; skips the confirmation prompt. Max 63 characters |
+| `--print-slug` | *(off)* | Print the proposed store address and exit |
+| `--skip-store-create` | *(off)* | Suppress public store page creation. Skips the address prompts |
 | `--skip-test-print` | *(off)* | Skip printer test label on first provisioning run |
 | `--lcd-display` | *(off)* | Configure a 7-inch 1024x600 HDMI LCD. The Pi detects its own model on first boot and applies the matching HDMI/USB settings. Use only for units with the LCD attached, not TV/headless. |
 | `--static-ip IP` | *(blank = DHCP)* | Optional static IP for the Pi |
@@ -163,7 +171,10 @@ The `GITHUB_PAT` is a GitHub fine-grained token scoped to `shopperdb` with Conte
 |-------|---------|-------------|
 | `ADMIN_SSH_KEY` | *(blank)* | Full contents of an SSH public key. Added to `authorized_keys` for the admin account; disables password-based SSH if set. |
 | `STORE_NAME` | *(blank)* | Display name for this station's public inventory page (e.g. `"Steve's Wheels and Deals"`). Use double quotes if the name contains spaces or an apostrophe. A store page is auto-created when the admin accepts the station. Leave blank to skip. |
-| `SKIP_STORE_CREATE` | `false` | Set to `true` to suppress public store page creation entirely. |
+| `STORE_CITY` | *(blank)* | Store city, used to build the store's web address. |
+| `STORE_STATE` | *(blank)* | Store state, 2 letters, used to build the store's web address. |
+| `STORE_SLUG` | *(blank)* | The confirmed web address label (the part before the domain). The server uses it as given rather than deriving one. Capped at 63 characters because it is a subdomain name. Blank means the server derives one from `STORE_NAME`. |
+| `SKIP_STORE_CREATE` | `false` | Set to `true` to suppress public store page creation entirely. The address fields are then ignored. |
 | `SKIP_TEST_PRINT` | `false` | Set to `true` to skip the printer test label during first provisioning. Useful if the label printer is not yet connected, or to verify the rest of setup before printing. Can also be set in `client/.env` for subsequent re-provision runs. |
 | `WIFI_SSID` / `WIFI_PASSWORD` | *(blank)* | WiFi credentials. Leave blank for Ethernet-only deployments. |
 | `STATIC_IP` / `STATIC_GATEWAY` | *(blank)* | Static IP. Leave blank to use DHCP. |

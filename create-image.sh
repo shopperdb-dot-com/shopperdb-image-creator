@@ -92,6 +92,88 @@ decrypt_value() {
         || true
 }
 
+# ── Store web address (subdomain label) ───────────────────────────────────────
+# A store's address label is the DNS label of its subdomain, so it is capped at the RFC 1035
+# limit of 63 characters. These mirror validate_slug()/propose_slug() in the server's
+# db_manager.py. The SERVER remains the authority - it re-validates on write and now uses the
+# label confirmed here verbatim - so this copy exists only to let the address be chosen and
+# checked at imaging time, with no network access.
+SLUG_MAX_LENGTH=63
+RESERVED_SLUGS=" www admin api mail ftp static media app "
+
+slugify() {
+    # Lowercase, drop apostrophes, reduce anything else to single hyphens, trim the ends.
+    # Transliterates accents when iconv can (cafe, not caf); falls back to dropping them.
+    local raw="$1" out
+    out=$(printf '%s' "$raw" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null || printf '%s' "$raw")
+    printf '%s' "$out" \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed -e "s/['\`]//g" \
+              -e 's/[^a-z0-9]\{1,\}/-/g' \
+              -e 's/^-\{1,\}//' \
+              -e 's/-\{1,\}$//'
+}
+
+slug_invalid_reason() {
+    # Echo why $1 cannot be used as a store address, or nothing when it is fine.
+    local slug="$1"
+    if [[ -z "$slug" ]]; then
+        printf 'Address cannot be empty.'
+    elif (( ${#slug} > SLUG_MAX_LENGTH )); then
+        printf 'Address is %d characters; the maximum is %d because it is a subdomain name.'             "${#slug}" "$SLUG_MAX_LENGTH"
+    elif [[ ! "$slug" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+        printf 'Use lowercase letters, numbers and hyphens only, not starting or ending with a hyphen.'
+    elif [[ "$slug" == *--* ]]; then
+        printf 'Address cannot contain two hyphens in a row.'
+    elif [[ "$RESERVED_SLUGS" == *" $slug "* ]]; then
+        printf "'%s' is reserved and cannot be used as a store address." "$slug"
+    fi
+}
+
+propose_slug() {
+    # Build "<name>-<city>-<state>", shortening only the NAME if the whole thing will not fit.
+    # The city/state tail is what distinguishes two stores sharing a name, so it is never cut.
+    local name_part city_part state_part tail full budget clipped
+    name_part=$(slugify "$1")
+    city_part=$(slugify "$2")
+    state_part=$(slugify "$3")
+
+    tail=""
+    [[ -n "$city_part"  ]] && tail="$city_part"
+    [[ -n "$state_part" ]] && tail="${tail:+$tail-}$state_part"
+
+    full="$name_part"
+    [[ -n "$tail" ]] && full="${full:+$full-}$tail"
+    if (( ${#full} <= SLUG_MAX_LENGTH )); then
+        printf '%s' "$full"
+        return
+    fi
+
+    if [[ -z "$tail" ]]; then
+        printf '%s' "$(printf '%s' "${name_part:0:SLUG_MAX_LENGTH}" | sed 's/-\{1,\}$//')"
+        return
+    fi
+
+    budget=$(( SLUG_MAX_LENGTH - ${#tail} - 1 ))
+    if (( budget <= 0 )); then
+        # A tail this long leaves no room for a name; keep what fits of the tail.
+        printf '%s' "$(printf '%s' "${tail:0:SLUG_MAX_LENGTH}" | sed 's/-\{1,\}$//')"
+        return
+    fi
+
+    clipped="${name_part:0:budget}"
+    # Prefer a whole word over a severed one, as long as something survives.
+    if [[ "$clipped" == *-* && ${#name_part} -gt $budget ]]; then
+        clipped="${clipped%-*}"
+    fi
+    clipped=$(printf '%s' "$clipped" | sed 's/-\{1,\}$//')
+    if [[ -n "$clipped" ]]; then
+        printf '%s-%s' "$clipped" "$tail"
+    else
+        printf '%s' "$tail"
+    fi
+}
+
 prompt_line() {
     local prompt="$1" default="${2:-}" val
     if [[ -n "$default" ]]; then
@@ -128,6 +210,10 @@ GITHUB_PAT=""
 ADMIN_SSH_KEY_PATH="$HOME/.ssh/id_ed25519.pub"
 
 STORE_NAME=""
+STORE_CITY=""
+STORE_STATE=""
+STORE_SLUG=""
+PRINT_SLUG="false"
 SKIP_STORE_CREATE="false"
 SKIP_TEST_PRINT="false"
 LCD_DISPLAY="false"
@@ -167,6 +253,10 @@ Usage: ./create-image.sh [options]
                              Pass "" to skip
 
   --store-name NAME          Store display name (e.g. "Steve's Wheels and Deals")
+  --store-city CITY          Store city, used in the store web address
+  --store-state ST           Store state, 2 letters, used in the store web address
+  --store-slug SLUG          Store web address label (skips the confirmation prompt)
+  --print-slug               Print the proposed store address and exit (no image work)
                              If set, a public store page is created when the admin accepts the station.
   --skip-store-create        Suppress public store page creation (default: off)
   --skip-test-print          Skip printer test label during first provisioning run (default: off)
@@ -218,6 +308,10 @@ while [[ $# -gt 0 ]]; do
         --github-pat)          GITHUB_PAT="$2";          _explicit+=(GithubPat);          shift 2 ;;
         --admin-ssh-key)       ADMIN_SSH_KEY_PATH="$2"; _explicit+=(AdminSshKeyPath); shift 2 ;;
         --store-name)          STORE_NAME="$2";    _explicit+=(StoreName);         shift 2 ;;
+        --store-city)          STORE_CITY="$2";    _explicit+=(StoreCity);         shift 2 ;;
+        --store-state)         STORE_STATE="$2";   _explicit+=(StoreState);        shift 2 ;;
+        --store-slug)          STORE_SLUG="$2";    _explicit+=(StoreSlug);         shift 2 ;;
+        --print-slug)          PRINT_SLUG="true";                                   shift   ;;
         --skip-store-create)   SKIP_STORE_CREATE="true"; _explicit+=(SkipStoreCreate); shift ;;
         --skip-test-print)     SKIP_TEST_PRINT="true"; _explicit+=(SkipTestPrint); shift   ;;
         --lcd-display)         LCD_DISPLAY="true";     _explicit+=(LcdDisplay);     shift   ;;
@@ -238,6 +332,22 @@ FULL_MODE=false
 [[ "$SKIP_FLASH" == "true" ]] && FULL_MODE=true
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RESET_DEFAULTS="${RESET_DEFAULTS:-false}"
+
+# ── --print-slug: report the proposed store address and exit ──────────────────
+# A utility mode, not part of imaging: it answers "what would this store's web address be?"
+# without touching a card. Also what the tests exercise, so the address rules stay covered.
+if [[ "$PRINT_SLUG" == "true" ]]; then
+    if [[ -z "$STORE_NAME" ]]; then
+        fail "--print-slug needs --store-name"
+    fi
+    _proposed="${STORE_SLUG:-$(propose_slug "$STORE_NAME" "$STORE_CITY" "$STORE_STATE")}"
+    _reason=$(slug_invalid_reason "$_proposed")
+    if [[ -n "$_reason" ]]; then
+        fail "$_reason"
+    fi
+    printf '%s\n' "$_proposed"
+    exit 0
+fi
 
 # ── Saved defaults ────────────────────────────────────────────────────────────
 
@@ -276,6 +386,10 @@ if [[ -f "$DEFAULTS_FILE" ]] && command -v python3 &>/dev/null; then
     _was_explicit ServerUrl      || SERVER_URL=$(_load_saved ServerUrl "$SERVER_URL")
     _was_explicit AdminSshKeyPath || ADMIN_SSH_KEY_PATH=$(_load_saved AdminSshKeyPath "$ADMIN_SSH_KEY_PATH")
     _was_explicit StoreName      || STORE_NAME=$(_load_saved StoreName "$STORE_NAME")
+    # City/state are remembered like other site preferences. The address itself never is: it
+    # belongs to one store, so reusing it for the next card would collide.
+    _was_explicit StoreCity      || STORE_CITY=$(_load_saved StoreCity "$STORE_CITY")
+    _was_explicit StoreState     || STORE_STATE=$(_load_saved StoreState "$STORE_STATE")
     _was_explicit StaticIp       || STATIC_IP=$(_load_saved StaticIp "$STATIC_IP")
     _was_explicit StaticGateway  || STATIC_GATEWAY=$(_load_saved StaticGateway "$STATIC_GATEWAY")
     _was_explicit StaticPrefix   || STATIC_PREFIX=$(_load_saved StaticPrefix "$STATIC_PREFIX")
@@ -462,10 +576,50 @@ fi
 if [[ -z "$STORE_NAME" ]] && ! _was_explicit StoreName; then
     STORE_NAME=$(prompt_line "Store display name (optional - Enter to skip)" "")
 fi
-if [[ -n "$STORE_NAME" ]]; then
-    ok "Store name: $STORE_NAME"
-else
+if [[ -z "$STORE_NAME" ]]; then
     ok "Store name: (none - no public store page)"
+elif [[ "$SKIP_STORE_CREATE" == "true" ]]; then
+    ok "Store name: $STORE_NAME"
+    ok "Store address: (none - SKIP_STORE_CREATE is set, so no store page is created)"
+    STORE_CITY=""; STORE_STATE=""; STORE_SLUG=""
+else
+    ok "Store name: $STORE_NAME"
+
+    # City and state are part of the address because they are what distinguishes two stores
+    # sharing a name. Collected here so the address can be confirmed before the card is written.
+    if [[ -z "$STORE_CITY" ]] && ! _was_explicit StoreCity; then
+        STORE_CITY=$(prompt_line "Store city" "")
+    fi
+    while [[ -z "$STORE_STATE" ]] || [[ ! "$STORE_STATE" =~ ^[A-Za-z]{2}$ ]]; do
+        if _was_explicit StoreState && [[ -n "$STORE_STATE" ]]; then
+            fail "Store state must be 2 letters (got '$STORE_STATE')"
+        fi
+        STORE_STATE=$(prompt_line "Store state (2 letters)" "")
+        [[ "$STORE_STATE" =~ ^[A-Za-z]{2}$ ]] || warn "State must be exactly 2 letters."
+    done
+    STORE_STATE=$(printf '%s' "$STORE_STATE" | tr '[:lower:]' '[:upper:]')
+
+    # Confirm the web address. The proposal shortens only the store name when the whole thing
+    # will not fit; nothing is applied without being shown and accepted.
+    while true; do
+        if [[ -z "$STORE_SLUG" ]]; then
+            _proposed=$(propose_slug "$STORE_NAME" "$STORE_CITY" "$STORE_STATE")
+            printf '\n  Proposed store address (%d/%d characters):\n    %s\n\n' \
+                "${#_proposed}" "$SLUG_MAX_LENGTH" "https://${_proposed}.<your-domain>" >/dev/tty
+            STORE_SLUG=$(prompt_line "Press Enter to accept, or type a different address" "$_proposed")
+            # Normalize what was typed (case, spaces, punctuation). Length is never adjusted -
+            # a too-long address is reported so a person decides what to shorten.
+            STORE_SLUG=$(slugify "$STORE_SLUG")
+        fi
+        _reason=$(slug_invalid_reason "$STORE_SLUG")
+        [[ -z "$_reason" ]] && break
+        if _was_explicit StoreSlug; then
+            fail "$_reason"
+        fi
+        warn "$_reason"
+        STORE_SLUG=""
+    done
+    ok "Store address: $STORE_SLUG (${#STORE_SLUG}/$SLUG_MAX_LENGTH characters)"
 fi
 
 # WiFi password (only when a secured WiFi SSID is configured)
@@ -922,6 +1076,12 @@ step "Writing station.conf to $out_file..."
     else
         printf 'STORE_NAME=\n'
     fi
+    printf '# The confirmed store web address, and the city/state it was built from. The server\n'
+    printf '# uses STORE_SLUG as given rather than deriving one, so the address is what was\n'
+    printf '# approved at imaging time.\n'
+    printf 'STORE_CITY="%s"\n'  "$STORE_CITY"
+    printf 'STORE_STATE="%s"\n' "$STORE_STATE"
+    printf 'STORE_SLUG="%s"\n'  "$STORE_SLUG"
     printf 'SKIP_STORE_CREATE=%s\n' "$SKIP_STORE_CREATE"
     printf 'SKIP_TEST_PRINT=%s\n' "$SKIP_TEST_PRINT"
     printf '\n'
@@ -957,6 +1117,7 @@ if command -v python3 &>/dev/null; then
            _D_WIFI_COUNTRY="$WIFI_COUNTRY" _D_WIFI_SECURITY="$WIFI_SECURITY" \
            _D_WIFI_HIDDEN="$WIFI_HIDDEN" _D_SERVER_URL="$SERVER_URL" \
            _D_ADMIN_SSH_KEY_PATH="$ADMIN_SSH_KEY_PATH" _D_STORE_NAME="$STORE_NAME" \
+           _D_STORE_CITY="$STORE_CITY" _D_STORE_STATE="$STORE_STATE" \
            _D_STATIC_IP="$STATIC_IP" _D_STATIC_GATEWAY="$STATIC_GATEWAY" \
            _D_STATIC_PREFIX="$STATIC_PREFIX" _D_STATIC_DNS="$STATIC_DNS" \
            _D_WIFI_PW_ENC="$_D_WIFI_PW_ENC" \
@@ -977,6 +1138,8 @@ mapping = {
     "ServerUrl":       "_D_SERVER_URL",
     "AdminSshKeyPath": "_D_ADMIN_SSH_KEY_PATH",
     "StoreName":       "_D_STORE_NAME",
+    "StoreCity":       "_D_STORE_CITY",
+    "StoreState":      "_D_STORE_STATE",
     "StaticIp":        "_D_STATIC_IP",
     "StaticGateway":   "_D_STATIC_GATEWAY",
     "StaticPrefix":    "_D_STATIC_PREFIX",
