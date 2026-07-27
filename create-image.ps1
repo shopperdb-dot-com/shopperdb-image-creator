@@ -285,6 +285,12 @@ function New-SlugProposal {
     return $tail
 }
 
+function Test-HasConsole {
+    # False when input is redirected (CI, a scripted build), where Read-Host returns empty
+    # forever. Callers check this instead of looping on a question nobody can answer.
+    try { return -not [Console]::IsInputRedirected } catch { return $false }
+}
+
 function Read-Secure {
     param([string]$Prompt)
     [Console]::Write("${Prompt}: ")
@@ -772,7 +778,7 @@ if ($AdminSshKeyPath -ne "" -and (Test-Path $AdminSshKeyPath -ErrorAction Silent
 }
 
 # Store display name (optional)
-if (-not $_explicitParams.Contains('StoreName') -and -not $StoreName) {
+if (-not $_explicitParams.Contains('StoreName') -and -not $StoreName -and (Test-HasConsole)) {
     $entered = (Read-Host "Store display name (optional - Enter to skip)").Trim()
     if ($entered) { $StoreName = $entered }
 }
@@ -785,19 +791,25 @@ if (-not $StoreName) {
 } else {
     Ok "Store name: $StoreName"
 
-    # City and state are part of the address because they are what distinguishes two stores
-    # sharing a name. Collected here so the address can be confirmed before the card is written.
-    if (-not $_explicitParams.Contains('StoreCity') -and -not $StoreCity) {
-        $StoreCity = (Read-Host "Store city").Trim()
-    }
-    while ($StoreState -notmatch '^[A-Za-z]{2}$') {
-        if ($_explicitParams.Contains('StoreState') -and $StoreState) {
-            Fail "Store state must be 2 letters (got '$StoreState')"
-        }
-        $StoreState = (Read-Host "Store state (2 letters)").Trim()
-        if ($StoreState -notmatch '^[A-Za-z]{2}$') { Warn "State must be exactly 2 letters." }
+    # A state passed on the command line is checked here, where the value came from a parameter
+    # and re-asking is not an option.
+    if ($StoreState -and $StoreState -notmatch '^[A-Za-z]{2}$') {
+        Fail "Store state must be 2 letters (got '$StoreState')"
     }
     $StoreState = $StoreState.ToUpperInvariant()
+
+    if (Test-HasConsole) {
+        # City and state are part of the address because they are what distinguishes two stores
+        # sharing a name. Collected here so the address can be confirmed before the card is written.
+        if (-not $_explicitParams.Contains('StoreCity') -and -not $StoreCity) {
+            $StoreCity = (Read-Host "Store city").Trim()
+        }
+        while ($StoreState -notmatch '^[A-Za-z]{2}$') {
+            $StoreState = (Read-Host "Store state (2 letters)").Trim()
+            if ($StoreState -notmatch '^[A-Za-z]{2}$') { Warn "State must be exactly 2 letters." }
+        }
+        $StoreState = $StoreState.ToUpperInvariant()
+    }
 
     # An address accepted on an earlier run is reused without asking again: it was already
     # confirmed, and a second card for the same store has to land on the same subdomain.
@@ -814,9 +826,16 @@ if (-not $StoreName) {
         $addressReused = $true
     }
 
+    # Without a console there is nobody to confirm an address, so none is invented. Whatever
+    # city/state were passed still travel to the server, which derives the address itself and
+    # refuses anything that would not resolve.
+    if (-not $StoreSlug -and -not (Test-HasConsole)) {
+        Warn "No console to confirm the store address - the server will derive one from the name, city and state."
+    }
+
     # Confirm the web address. The proposal shortens only the store name when the whole thing
     # will not fit; nothing is applied without being shown and accepted.
-    while ($true) {
+    while ($StoreSlug -or (Test-HasConsole)) {
         if (-not $StoreSlug) {
             $proposed = New-SlugProposal $StoreName $StoreCity $StoreState
             Write-Host ""
@@ -835,7 +854,9 @@ if (-not $StoreName) {
         $StoreSlug = ""
         $addressReused = $false
     }
-    if ($addressReused) {
+    if (-not $StoreSlug) {
+        Ok "Store address: (none confirmed - the server will derive one)"
+    } elseif ($addressReused) {
         Ok ("Store address: https://{0}.{1} (confirmed on an earlier run - -ReconfirmAddress to change it)" -f
             $StoreSlug, $script:StoreDomain)
     } else {

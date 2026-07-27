@@ -179,6 +179,14 @@ propose_slug() {
     fi
 }
 
+has_tty() {
+    # True when there is a terminal to ask questions on. Every prompt reads /dev/tty directly
+    # (so it still works with stdin piped), which means a run with no terminal at all - CI, a
+    # scripted build - gets an empty answer forever. Callers check this instead of looping on
+    # a question nobody can answer.
+    { : >/dev/tty; } 2>/dev/null
+}
+
 prompt_line() {
     local prompt="$1" default="${2:-}" val
     if [[ -n "$default" ]]; then
@@ -594,7 +602,7 @@ elif [[ -n "$ADMIN_SSH_KEY_PATH" ]]; then
 fi
 
 # Store display name (optional)
-if [[ -z "$STORE_NAME" ]] && ! _was_explicit StoreName; then
+if [[ -z "$STORE_NAME" ]] && ! _was_explicit StoreName && has_tty; then
     STORE_NAME=$(prompt_line "Store display name (optional - Enter to skip)" "")
 fi
 if [[ -z "$STORE_NAME" ]]; then
@@ -606,19 +614,25 @@ elif [[ "$SKIP_STORE_CREATE" == "true" ]]; then
 else
     ok "Store name: $STORE_NAME"
 
-    # City and state are part of the address because they are what distinguishes two stores
-    # sharing a name. Collected here so the address can be confirmed before the card is written.
-    if [[ -z "$STORE_CITY" ]] && ! _was_explicit StoreCity; then
-        STORE_CITY=$(prompt_line "Store city" "")
+    # A state passed on the command line is checked here, where the value came from a flag and
+    # re-asking is not an option.
+    if [[ -n "$STORE_STATE" && ! "$STORE_STATE" =~ ^[A-Za-z]{2}$ ]]; then
+        fail "Store state must be 2 letters (got '$STORE_STATE')"
     fi
-    while [[ -z "$STORE_STATE" ]] || [[ ! "$STORE_STATE" =~ ^[A-Za-z]{2}$ ]]; do
-        if _was_explicit StoreState && [[ -n "$STORE_STATE" ]]; then
-            fail "Store state must be 2 letters (got '$STORE_STATE')"
-        fi
-        STORE_STATE=$(prompt_line "Store state (2 letters)" "")
-        [[ "$STORE_STATE" =~ ^[A-Za-z]{2}$ ]] || warn "State must be exactly 2 letters."
-    done
     STORE_STATE=$(printf '%s' "$STORE_STATE" | tr '[:lower:]' '[:upper:]')
+
+    if has_tty; then
+        # City and state are part of the address because they are what distinguishes two stores
+        # sharing a name. Collected here so the address can be confirmed before the card is written.
+        if [[ -z "$STORE_CITY" ]] && ! _was_explicit StoreCity; then
+            STORE_CITY=$(prompt_line "Store city" "")
+        fi
+        while [[ ! "$STORE_STATE" =~ ^[A-Za-z]{2}$ ]]; do
+            STORE_STATE=$(prompt_line "Store state (2 letters)" "")
+            [[ "$STORE_STATE" =~ ^[A-Za-z]{2}$ ]] || warn "State must be exactly 2 letters."
+        done
+        STORE_STATE=$(printf '%s' "$STORE_STATE" | tr '[:lower:]' '[:upper:]')
+    fi
 
     # An address accepted on an earlier run is reused without asking again: it was already
     # confirmed, and a second card for the same store has to land on the same subdomain.
@@ -635,9 +649,17 @@ else
         _address_reused="true"
     fi
 
+    # Without a terminal there is nobody to confirm an address, so none is invented. Whatever
+    # city/state were passed still travel to the server, which derives the address itself and
+    # refuses anything that would not resolve. Silence here is what made a scripted run hang on
+    # an unanswerable prompt.
+    if [[ -z "$STORE_SLUG" ]] && ! has_tty; then
+        warn "No terminal to confirm the store address - the server will derive one from the name, city and state."
+    fi
+
     # Confirm the web address. The proposal shortens only the store name when the whole thing
     # will not fit; nothing is applied without being shown and accepted.
-    while true; do
+    while [[ -n "$STORE_SLUG" ]] || has_tty; do
         if [[ -z "$STORE_SLUG" ]]; then
             _proposed=$(propose_slug "$STORE_NAME" "$STORE_CITY" "$STORE_STATE")
             printf '\n  Proposed store address (%d/%d characters):\n    %s\n\n' \
@@ -656,7 +678,9 @@ else
         STORE_SLUG=""
         _address_reused="false"
     done
-    if [[ "$_address_reused" == "true" ]]; then
+    if [[ -z "$STORE_SLUG" ]]; then
+        ok "Store address: (none confirmed - the server will derive one)"
+    elif [[ "$_address_reused" == "true" ]]; then
         ok "Store address: https://${STORE_SLUG}.${STORE_DOMAIN} (confirmed on an earlier run - --reconfirm-address to change it)"
     else
         ok "Store address: https://${STORE_SLUG}.${STORE_DOMAIN} (${#STORE_SLUG}/$SLUG_MAX_LENGTH characters)"

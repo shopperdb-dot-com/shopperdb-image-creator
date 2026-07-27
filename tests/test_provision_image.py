@@ -969,6 +969,29 @@ class TestStoreAddressIsRemembered:
         assert result.returncode == 0, result.stderr
         assert 'STORE_SLUG="steves-wheels-hartford-ct"' in (boot / "station.conf").read_text()
 
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            ("--store-name", "Joe's Thrift Shop"),
+            ("--store-name", "Joe's Thrift Shop", "--store-city", "Watertown", "--store-state", "CT"),
+        ],
+    )
+    def test_a_run_with_no_terminal_finishes_instead_of_hanging(self, tmp_path, extra):
+        """Every prompt reads /dev/tty, so with no terminal an unanswered question loops forever.
+
+        This hung the whole run rather than failing it, which is worse: a scripted build sits
+        until something kills it. With nobody to confirm an address, none is invented - the
+        city/state still travel and the server derives the address, refusing any that would
+        not resolve.
+        """
+        boot = _boot(tmp_path)
+        _DEFAULTS_FILE.unlink(missing_ok=True)
+        result = _run_provision(boot, *extra)
+        assert result.returncode == 0, result.stderr
+        conf = (boot / "station.conf").read_text()
+        assert 'STORE_NAME="Joe\'s Thrift Shop"' in conf
+        assert 'STORE_SLUG=""' in conf  # nothing confirmed, so nothing claimed
+
     def test_defaults_written_with_a_bom_are_still_read(self, tmp_path):
         """create-image.ps1 writes this file with a BOM; a plain utf-8 read fails on it
         silently, making every saved value - including the address - look absent."""
