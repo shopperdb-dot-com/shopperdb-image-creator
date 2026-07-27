@@ -916,11 +916,15 @@ class TestStoreAddressIsRemembered:
         assert result.returncode == 0, result.stderr
         assert f'STORE_SLUG="{STORE_SLUG}"' in (boot / "station.conf").read_text()
 
+    # These run without a terminal, so the confirmation prompt cannot happen. That is what makes
+    # them a clean test of reuse: the saved address either survives into station.conf or it does
+    # not, with no interactive step in between. An empty STORE_SLUG means the run declined to
+    # claim an address it could not confirm, which is the correct outcome here.
     @pytest.mark.parametrize(
         ("flag", "value"),
         [("--store-city", "Hartford"), ("--store-state", "MA"), ("--store-name", "Different Store")],
     )
-    def test_changing_the_store_identity_asks_again(self, tmp_path, flag, value):
+    def test_changing_the_store_identity_drops_the_saved_address(self, tmp_path, flag, value):
         boot = _boot(tmp_path)
         self._seed(
             StoreName="Steve's Wheels and Deals",
@@ -929,10 +933,12 @@ class TestStoreAddressIsRemembered:
             StoreSlug=STORE_SLUG,
         )
         result = _run_provision(boot, flag, value)
-        assert result.returncode != 0, "a moved address must be re-confirmed, not reused"
-        assert not (boot / "station.conf").exists()
+        assert result.returncode == 0, result.stderr
+        conf = (boot / "station.conf").read_text()
+        assert STORE_SLUG not in conf, "a moved address must be re-confirmed, not reused"
+        assert 'STORE_SLUG=""' in conf
 
-    def test_reconfirm_flag_asks_again(self, tmp_path):
+    def test_reconfirm_flag_drops_the_saved_address(self, tmp_path):
         boot = _boot(tmp_path)
         self._seed(
             StoreName="Steve's Wheels and Deals",
@@ -941,8 +947,8 @@ class TestStoreAddressIsRemembered:
             StoreSlug=STORE_SLUG,
         )
         result = _run_provision(boot, "--reconfirm-address")
-        assert result.returncode != 0
-        assert not (boot / "station.conf").exists()
+        assert result.returncode == 0, result.stderr
+        assert 'STORE_SLUG=""' in (boot / "station.conf").read_text()
 
     def test_an_unusable_saved_address_is_not_reused(self, tmp_path):
         """A hand-edited or over-long saved value must not slip through unvalidated."""
@@ -954,8 +960,10 @@ class TestStoreAddressIsRemembered:
             StoreSlug="a" * 64,
         )
         result = _run_provision(boot, *STORE_ARGS)
-        assert result.returncode != 0
-        assert not (boot / "station.conf").exists()
+        assert result.returncode == 0, result.stderr
+        conf = (boot / "station.conf").read_text()
+        assert "a" * 64 not in conf
+        assert 'STORE_SLUG=""' in conf
 
     def test_explicit_slug_overrides_the_saved_one(self, tmp_path):
         boot = _boot(tmp_path)
