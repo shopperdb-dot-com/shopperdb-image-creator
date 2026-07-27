@@ -48,6 +48,7 @@ htmlcov/
 # Station config (written to SD card boot partition - may contain secrets)
 station.conf
 
-# Saved defaults for create-image scripts (may contain DPAPI-encrypted secrets)
-.create-image.defaults.json
-.create-image.defaults
+# Saved defaults for create-image scripts (may contain DPAPI-encrypted secrets).
+# Glob, not exact names: hand-made backups (.create-image.defaults.OLD-json and the like)
+# carry the same encrypted credentials and must not be committable either.
+.create-image.defaults*

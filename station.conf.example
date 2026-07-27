@@ -10,14 +10,18 @@
 # This file is NOT checked into the repo. Use station.conf.example
 # as the template.
 
-# REQUIRED - Server registration secret (from server .env)
+# REQUIRED - Registration secret, supplied by ShopperDB
 REGISTRATION_SECRET=
 
-# REQUIRED - Server URL for initial registration (pre-VPN, LAN or public)
-SERVER_URL=
+# REQUIRED - The server this station registers with.
+# Use https://shopperdb.com unless you were told otherwise. create-image.sh /
+# create-image.ps1 fill this in for you; only change it to point a test station
+# at a development server.
+SERVER_URL=https://shopperdb.com
 
-# REQUIRED - GitHub fine-grained PAT with read-only Contents access to shopperdb
-# Create at: GitHub > Settings > Developer Settings > Personal Access Tokens > Fine-grained tokens
+# REQUIRED - GitHub access token, supplied by ShopperDB.
+# The station uses it to download and update its software. Paste the token you
+# were given; you do not create one yourself.
 GITHUB_PAT=
 
 # OPTIONAL - Admin SSH public key for passwordless login (recommended)
@@ -39,7 +43,8 @@ STORE_NAME=
 # only lowercase letters, numbers and hyphens.
 #
 # create-image.sh / create-image.ps1 fill these in and have you confirm the
-# address. Leave blank to let the server derive one from STORE_NAME alone.
+# address once. Later cards for the same store reuse the confirmed address
+# without asking again. Leave blank to let the server derive one from STORE_NAME.
 STORE_CITY=
 STORE_STATE=
 STORE_SLUG=

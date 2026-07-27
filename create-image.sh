@@ -101,6 +101,11 @@ decrypt_value() {
 SLUG_MAX_LENGTH=63
 RESERVED_SLUGS=" www admin api mail ftp static media app "
 
+# The public domain stores are reachable under. Deliberately independent of SERVER_URL: a card
+# built against a local dev server still shows the production address, because that is where the
+# store will actually live once it is accepted.
+STORE_DOMAIN="shopperdb.com"
+
 slugify() {
     # Lowercase, drop apostrophes, reduce anything else to single hyphens, trim the ends.
     # Transliterates accents when iconv can (cafe, not caf); falls back to dropping them.
@@ -204,6 +209,9 @@ WIFI_HIDDEN="false"
 
 LOCALE="en_US.UTF-8"
 
+# Cards are built for the production site. --server-url overrides it for local testing; the
+# override is never remembered between runs, so a dev URL cannot silently ship on a real card.
+DEFAULT_SERVER_URL="https://shopperdb.com"
 SERVER_URL=""
 REGISTRATION_SECRET=""
 GITHUB_PAT=""
@@ -214,6 +222,7 @@ STORE_CITY=""
 STORE_STATE=""
 STORE_SLUG=""
 PRINT_SLUG="false"
+RECONFIRM_ADDRESS="false"
 SKIP_STORE_CREATE="false"
 SKIP_TEST_PRINT="false"
 LCD_DISPLAY="false"
@@ -246,9 +255,13 @@ Usage: ./create-image.sh [options]
   --wifi-security TYPE       wpa2 (default) or open
   --wifi-hidden              Network has a hidden SSID
 
-  --server-url URL           Server URL (e.g. http://192.168.2.100:8000)
-  --registration-secret S    Registration secret from server .env
-  --github-pat TOKEN         GitHub PAT with read-only Contents access to shopperdb
+  --server-url URL           Override the server the station registers with.
+                             Default: https://shopperdb.com. Use only to point a
+                             test card at a local dev server, e.g.
+                             --server-url http://192.168.2.100:8000
+                             Never remembered between runs.
+  --registration-secret S    Registration secret supplied by ShopperDB
+  --github-pat TOKEN         GitHub access token supplied by ShopperDB
   --admin-ssh-key PATH       Admin SSH public key (default: ~/.ssh/id_ed25519.pub)
                              Pass "" to skip
 
@@ -256,6 +269,8 @@ Usage: ./create-image.sh [options]
   --store-city CITY          Store city, used in the store web address
   --store-state ST           Store state, 2 letters, used in the store web address
   --store-slug SLUG          Store web address label (skips the confirmation prompt)
+  --reconfirm-address        Re-confirm the store web address even when the saved one
+                             still applies (normally it is only asked for once)
   --print-slug               Print the proposed store address and exit (no image work)
                              If set, a public store page is created when the admin accepts the station.
   --skip-store-create        Suppress public store page creation (default: off)
@@ -311,6 +326,7 @@ while [[ $# -gt 0 ]]; do
         --store-city)          STORE_CITY="$2";    _explicit+=(StoreCity);         shift 2 ;;
         --store-state)         STORE_STATE="$2";   _explicit+=(StoreState);        shift 2 ;;
         --store-slug)          STORE_SLUG="$2";    _explicit+=(StoreSlug);         shift 2 ;;
+        --reconfirm-address)   RECONFIRM_ADDRESS="true";                            shift   ;;
         --print-slug)          PRINT_SLUG="true";                                   shift   ;;
         --skip-store-create)   SKIP_STORE_CREATE="true"; _explicit+=(SkipStoreCreate); shift ;;
         --skip-test-print)     SKIP_TEST_PRINT="true"; _explicit+=(SkipTestPrint); shift   ;;
@@ -363,8 +379,10 @@ _was_explicit() { local k="$1"; [[ " ${_explicit[*]} " == *" $k "* ]]; }
 _load_saved() {
     local key="$1" fallback="${2:-}"
     local val
+    # utf-8-sig, not utf-8: create-image.ps1 writes the shared defaults file with a BOM, and a
+    # plain utf-8 read fails on it - silently, making every saved value look absent.
     val=$(DEFAULTS_FILE_PATH="$DEFAULTS_FILE" LOOKUP_KEY="$key" \
-        python3 -c "import json,os; d=json.load(open(os.environ['DEFAULTS_FILE_PATH'])); print(d.get(os.environ['LOOKUP_KEY'],''))" \
+        python3 -c "import json,os; d=json.load(open(os.environ['DEFAULTS_FILE_PATH'], encoding='utf-8-sig')); print(d.get(os.environ['LOOKUP_KEY'],''))" \
         2>/dev/null) || true
     printf '%s' "${val:-$fallback}"
 }
@@ -383,11 +401,9 @@ if [[ -f "$DEFAULTS_FILE" ]] && command -v python3 &>/dev/null; then
     _was_explicit WifiCountry    || WIFI_COUNTRY=$(_load_saved WifiCountry "$WIFI_COUNTRY")
     _was_explicit WifiSecurity   || WIFI_SECURITY=$(_load_saved WifiSecurity "$WIFI_SECURITY")
     _was_explicit WifiHidden     || WIFI_HIDDEN=$(_load_saved WifiHidden "$WIFI_HIDDEN")
-    _was_explicit ServerUrl      || SERVER_URL=$(_load_saved ServerUrl "$SERVER_URL")
+    # ServerUrl is deliberately NOT restored - see DEFAULT_SERVER_URL.
     _was_explicit AdminSshKeyPath || ADMIN_SSH_KEY_PATH=$(_load_saved AdminSshKeyPath "$ADMIN_SSH_KEY_PATH")
     _was_explicit StoreName      || STORE_NAME=$(_load_saved StoreName "$STORE_NAME")
-    # City/state are remembered like other site preferences. The address itself never is: it
-    # belongs to one store, so reusing it for the next card would collide.
     _was_explicit StoreCity      || STORE_CITY=$(_load_saved StoreCity "$STORE_CITY")
     _was_explicit StoreState     || STORE_STATE=$(_load_saved StoreState "$STORE_STATE")
     _was_explicit StaticIp       || STATIC_IP=$(_load_saved StaticIp "$STATIC_IP")
@@ -395,6 +411,14 @@ if [[ -f "$DEFAULTS_FILE" ]] && command -v python3 &>/dev/null; then
     _was_explicit StaticPrefix   || STATIC_PREFIX=$(_load_saved StaticPrefix "$STATIC_PREFIX")
     _was_explicit StaticDns      || STATIC_DNS=$(_load_saved StaticDns "$STATIC_DNS")
 fi
+
+# The store identity from the previous run, kept separate from the working values so the two
+# can be compared. If the name/city/state are unchanged, the address confirmed last time still
+# applies and is reused rather than asked about again.
+_SAVED_STORE_NAME=$(_load_saved "StoreName")
+_SAVED_STORE_CITY=$(_load_saved "StoreCity")
+_SAVED_STORE_STATE=$(_load_saved "StoreState")
+_SAVED_STORE_SLUG=$(_load_saved "StoreSlug")
 
 # Load saved encrypted credentials (machine-bound; empty if not present or different machine)
 _SAVED_WIFI_PW_ENC=$(_load_saved "WifiPasswordEnc")
@@ -478,7 +502,7 @@ if [[ -z "$GITHUB_PAT" ]]; then
         ok "GitHub PAT: using saved value"
     else
         [[ -n "$_SAVED_GITHUB_PAT_ENC" ]] && warn "Saved GitHub PAT cannot be decrypted (saved on a different machine) - please re-enter"
-        GITHUB_PAT=$(read_secure "GitHub PAT (shopperdb-fleet-deploy, read-only Contents)")
+        GITHUB_PAT=$(read_secure "GitHub access token (provided by ShopperDB)")
     fi
 fi
 [[ -n "$GITHUB_PAT" ]] || fail "GITHUB_PAT is required."
@@ -528,20 +552,17 @@ if $FULL_MODE; then
     fi
 fi
 
-# Server URL (default derived from this host's LAN IP)
-if [[ -z "$SERVER_URL" ]]; then
-    default_url=""
-    if [[ "$OS_TYPE" == "Darwin" ]]; then
-        local_ip=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)
-    else
-        local_ip=$(ip route get 1 2>/dev/null | awk '/src/{print $7; exit}' || \
-                   hostname -I 2>/dev/null | awk '{print $1}' || true)
-    fi
-    [[ -n "${local_ip:-}" ]] && default_url="http://${local_ip}:8000"
-    SERVER_URL=$(prompt_line "Server URL" "$default_url")
+# Server URL - the production site unless --server-url points somewhere else. No prompt: for a
+# real card there is only one right answer, and asking every time invites a mistyped one.
+[[ -n "$SERVER_URL" ]] || SERVER_URL="$DEFAULT_SERVER_URL"
+[[ "$SERVER_URL" =~ ^https?:// ]] || fail "Server URL must start with http:// or https:// (got '$SERVER_URL')"
+SERVER_URL="${SERVER_URL%/}"
+if [[ "$SERVER_URL" == "$DEFAULT_SERVER_URL" ]]; then
+    ok "Server URL: $SERVER_URL"
+else
+    # Loud on purpose: a card pointed at a laptop looks identical to a real one until it boots.
+    warn "Server URL: $SERVER_URL (override - the default is $DEFAULT_SERVER_URL)"
 fi
-[[ -n "$SERVER_URL" ]] || fail "SERVER_URL is required."
-ok "Server URL: $SERVER_URL"
 
 # Registration secret
 if [[ -z "$REGISTRATION_SECRET" ]]; then
@@ -599,13 +620,28 @@ else
     done
     STORE_STATE=$(printf '%s' "$STORE_STATE" | tr '[:lower:]' '[:upper:]')
 
+    # An address accepted on an earlier run is reused without asking again: it was already
+    # confirmed, and a second card for the same store has to land on the same subdomain.
+    # Comparing the slugified inputs (not the raw text) means "watertown" and "Watertown" are
+    # the same answer, while any change that would actually move the address - a different
+    # name, city or state - drops through to a fresh confirmation. So does --reconfirm-address.
+    _address_reused="false"
+    if [[ -z "$STORE_SLUG" && "$RECONFIRM_ADDRESS" != "true" && -n "$_SAVED_STORE_SLUG" ]] \
+       && [[ "$(slugify "$STORE_NAME")"  == "$(slugify "$_SAVED_STORE_NAME")"  ]] \
+       && [[ "$(slugify "$STORE_CITY")"  == "$(slugify "$_SAVED_STORE_CITY")"  ]] \
+       && [[ "$(slugify "$STORE_STATE")" == "$(slugify "$_SAVED_STORE_STATE")" ]] \
+       && [[ -z "$(slug_invalid_reason "$_SAVED_STORE_SLUG")" ]]; then
+        STORE_SLUG="$_SAVED_STORE_SLUG"
+        _address_reused="true"
+    fi
+
     # Confirm the web address. The proposal shortens only the store name when the whole thing
     # will not fit; nothing is applied without being shown and accepted.
     while true; do
         if [[ -z "$STORE_SLUG" ]]; then
             _proposed=$(propose_slug "$STORE_NAME" "$STORE_CITY" "$STORE_STATE")
             printf '\n  Proposed store address (%d/%d characters):\n    %s\n\n' \
-                "${#_proposed}" "$SLUG_MAX_LENGTH" "https://${_proposed}.<your-domain>" >/dev/tty
+                "${#_proposed}" "$SLUG_MAX_LENGTH" "https://${_proposed}.${STORE_DOMAIN}" >/dev/tty
             STORE_SLUG=$(prompt_line "Press Enter to accept, or type a different address" "$_proposed")
             # Normalize what was typed (case, spaces, punctuation). Length is never adjusted -
             # a too-long address is reported so a person decides what to shorten.
@@ -618,8 +654,13 @@ else
         fi
         warn "$_reason"
         STORE_SLUG=""
+        _address_reused="false"
     done
-    ok "Store address: $STORE_SLUG (${#STORE_SLUG}/$SLUG_MAX_LENGTH characters)"
+    if [[ "$_address_reused" == "true" ]]; then
+        ok "Store address: https://${STORE_SLUG}.${STORE_DOMAIN} (confirmed on an earlier run - --reconfirm-address to change it)"
+    else
+        ok "Store address: https://${STORE_SLUG}.${STORE_DOMAIN} (${#STORE_SLUG}/$SLUG_MAX_LENGTH characters)"
+    fi
 fi
 
 # WiFi password (only when a secured WiFi SSID is configured)
@@ -1115,9 +1156,10 @@ if command -v python3 &>/dev/null; then
            _D_TIMEZONE="$TIMEZONE" _D_KEYBOARD="$KEYBOARD_LAYOUT" \
            _D_LOCALE="$LOCALE" _D_WIFI_SSID="$WIFI_SSID" \
            _D_WIFI_COUNTRY="$WIFI_COUNTRY" _D_WIFI_SECURITY="$WIFI_SECURITY" \
-           _D_WIFI_HIDDEN="$WIFI_HIDDEN" _D_SERVER_URL="$SERVER_URL" \
+           _D_WIFI_HIDDEN="$WIFI_HIDDEN" \
            _D_ADMIN_SSH_KEY_PATH="$ADMIN_SSH_KEY_PATH" _D_STORE_NAME="$STORE_NAME" \
            _D_STORE_CITY="$STORE_CITY" _D_STORE_STATE="$STORE_STATE" \
+           _D_STORE_SLUG="$STORE_SLUG" \
            _D_STATIC_IP="$STATIC_IP" _D_STATIC_GATEWAY="$STATIC_GATEWAY" \
            _D_STATIC_PREFIX="$STATIC_PREFIX" _D_STATIC_DNS="$STATIC_DNS" \
            _D_WIFI_PW_ENC="$_D_WIFI_PW_ENC" \
@@ -1135,11 +1177,11 @@ mapping = {
     "WifiCountry":     "_D_WIFI_COUNTRY",
     "WifiSecurity":    "_D_WIFI_SECURITY",
     "WifiHidden":      "_D_WIFI_HIDDEN",
-    "ServerUrl":       "_D_SERVER_URL",
     "AdminSshKeyPath": "_D_ADMIN_SSH_KEY_PATH",
     "StoreName":       "_D_STORE_NAME",
     "StoreCity":       "_D_STORE_CITY",
     "StoreState":      "_D_STORE_STATE",
+    "StoreSlug":       "_D_STORE_SLUG",
     "StaticIp":        "_D_STATIC_IP",
     "StaticGateway":   "_D_STATIC_GATEWAY",
     "StaticPrefix":    "_D_STATIC_PREFIX",
@@ -1150,13 +1192,16 @@ mapping = {
 }
 dest = os.environ.get("_D_FILE", "")
 try:
-    with open(dest) as f:
+    # utf-8-sig: create-image.ps1 may have written this file with a BOM.
+    with open(dest, encoding="utf-8-sig") as f:
         existing = json.load(f)
 except Exception:
     existing = {}
 for k, env_k in mapping.items():
     existing[k] = os.environ.get(env_k, "")
-for stale in ["SkipStoreCreate", "SkipTestPrint"]:
+# ServerUrl was cached by earlier versions. Dropped so a --server-url override used for one
+# test card can never linger and ship on the next real one.
+for stale in ["SkipStoreCreate", "SkipTestPrint", "ServerUrl"]:
     existing.pop(stale, None)
 with open(dest, "w") as f:
     json.dump(existing, f, indent=2)

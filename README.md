@@ -13,7 +13,7 @@ Handles the full workflow - flash a base OS image, customise it, and write `stat
 | Boot 1 | `firstrun.sh` sets hostname, admin account, SSH, WiFi; Pi reboots | ~1 min |
 | Boot 2 | `first_boot.sh` installs software, registers with server, starts VPN | ~5-10 min |
 
-After Boot 2, accept the station at `<SERVER_URL>/admin/clients`. See `client/docs/README.md` in the shopperdb repo for full details on what happens during each boot.
+After Boot 2, a ShopperDB administrator accepts the station and its store page goes live. See `client/docs/README.md` in the shopperdb repo for full details on what happens during each boot.
 
 ## Prerequisites
 
@@ -38,14 +38,17 @@ Use **Raspberry Pi OS Lite (64-bit), Trixie/Debian 13** as the base image, avail
 
 ## What you'll need
 
-Gather these before running the script. The script prompts for any value not passed as a parameter and saves encrypted copies locally for reuse on subsequent runs.
+Gather these before running the script. The script prompts for any value not passed as a parameter and saves encrypted copies locally, so you only enter each one once.
 
 | Value | Where to get it |
 |-------|----------------|
-| **Registration secret** | From the server administrator - set in `server/.env` as `REGISTRATION_SECRET` |
-| **GitHub PAT** | Create at GitHub > Settings > Developer Settings > Personal Access Tokens > Fine-grained tokens. Scope to `shopperdb`, Contents: Read-only |
-| **Server URL** | Base URL of the inventory server, e.g. `http://192.168.2.100:8000` |
+| **Registration secret** | Supplied by ShopperDB |
+| **GitHub access token** | Supplied by ShopperDB. Paste the token you were given - you do not create one yourself |
 | **WiFi password** | Your network's password (omit for Ethernet-only deployments) |
+
+Both credentials come from ShopperDB as part of onboarding. Keep them somewhere safe: they are entered once per computer, then stored encrypted and reused automatically. If a token stops working, ask ShopperDB for a replacement rather than issuing your own - a self-issued token will not have the right access.
+
+You do **not** need to supply a server URL. Stations register with `https://shopperdb.com` by default.
 
 ## Usage
 
@@ -83,13 +86,14 @@ Run `Get-Help .\create-image.ps1 -Full` for all parameters.
 | `-Hostname` | `sbc-shopperdb` | Pi hostname |
 | `-Username` | `admin` | Admin OS user account to create on the Pi |
 | `-WifiSsid` | *(blank = Ethernet-only)* | WiFi network name |
-| `-ServerUrl` | *(saved or prompt)* | Server base URL, e.g. `http://192.168.2.100:8000` |
-| `-GithubPat` | *(prompted)* | GitHub PAT with read-only Contents access to shopperdb |
+| `-ServerUrl` | `https://shopperdb.com` | Override only to point a test card at a dev server. Never remembered between runs |
+| `-GithubPat` | *(prompted)* | GitHub access token supplied by ShopperDB |
 | `-AdminSshKeyPath` | `~\.ssh\id_ed25519.pub` | Admin public key (pass `""` to skip) |
 | `-StoreName` | *(saved or blank = none)* | Store display name, e.g. `"Steve's Wheels and Deals"` - creates a public store page when the admin accepts the station. Saved between runs; pass `""` to clear. |
 | `-StoreCity` | *(saved or blank)* | Store city - part of the store's web address. Prompted for when a store name is set. |
 | `-StoreState` | *(saved or blank)* | Store state, 2 letters - part of the store's web address. |
-| `-StoreSlug` | *(confirmed at the prompt)* | The store's web address label. Pass to set it outright and skip the confirmation prompt. Max 63 characters. |
+| `-StoreSlug` | *(confirmed once, then saved)* | The store's web address label. Pass to set it outright and skip the confirmation prompt. Max 63 characters. |
+| `-ReconfirmAddress` | *(off)* | Ask about the store web address again even when the saved one still applies. |
 | `-PrintSlug` | *(off)* | Print the proposed store address and exit, without touching a card. |
 | `-SkipStoreCreate` | `$false` | Suppress public store page creation (for internal/test deployments). Skips the address prompts. |
 | `-SkipTestPrint` | `$false` | Skip printer test label on first provisioning run (useful before the printer is connected) |
@@ -135,13 +139,14 @@ Run `./create-image.sh --help` for the full option list.
 | `--hostname NAME` | `sbc-shopperdb` | Pi hostname |
 | `--username NAME` | `admin` | Admin OS user account to create on the Pi |
 | `--wifi-ssid SSID` | *(blank = Ethernet-only)* | WiFi network name |
-| `--server-url URL` | *(prompted)* | Server base URL |
-| `--github-pat TOKEN` | *(prompted)* | GitHub PAT with read-only Contents access to shopperdb |
+| `--server-url URL` | `https://shopperdb.com` | Override only to point a test card at a dev server. Never remembered between runs |
+| `--github-pat TOKEN` | *(prompted)* | GitHub access token supplied by ShopperDB |
 | `--admin-ssh-key PATH` | `~/.ssh/id_ed25519.pub` | Admin public key (pass `""` to skip) |
 | `--store-name NAME` | *(saved or blank = none)* | Store display name - creates a public store page when the admin accepts the station. Saved between runs. |
 | `--store-city CITY` | *(saved or blank)* | Store city - part of the store's web address |
 | `--store-state ST` | *(saved or blank)* | Store state, 2 letters - part of the store's web address |
-| `--store-slug SLUG` | *(confirmed at the prompt)* | The store's web address label; skips the confirmation prompt. Max 63 characters |
+| `--store-slug SLUG` | *(confirmed once, then saved)* | The store's web address label; skips the confirmation prompt. Max 63 characters |
+| `--reconfirm-address` | *(off)* | Ask about the store web address again even when the saved one still applies |
 | `--print-slug` | *(off)* | Print the proposed store address and exit |
 | `--skip-store-create` | *(off)* | Suppress public store page creation. Skips the address prompts |
 | `--skip-test-print` | *(off)* | Skip printer test label on first provisioning run |
@@ -156,14 +161,35 @@ Written to the SD card's `bootfs` partition by both scripts. See `station.conf.e
 
 **Required fields:**
 ```ini
-REGISTRATION_SECRET=<provided by the server administrator>
-SERVER_URL=http://192.168.2.100:8000
-GITHUB_PAT=<fine-grained PAT with read-only Contents access to shopperdb>
+REGISTRATION_SECRET=<supplied by ShopperDB>
+SERVER_URL=https://shopperdb.com
+GITHUB_PAT=<supplied by ShopperDB>
 ```
 
-`REGISTRATION_SECRET` is set by the server administrator in the server's environment and must be entered securely when creating an image. The scripts prompt for it and save an encrypted copy locally so subsequent runs can reuse it without re-entering.
+`REGISTRATION_SECRET` and `GITHUB_PAT` are both issued by ShopperDB during onboarding. The scripts prompt for them securely, then save encrypted copies locally so later runs reuse them without re-entering. Onboarding a new station never requires creating credentials of your own.
 
-The `GITHUB_PAT` is a GitHub fine-grained token scoped to `shopperdb` with Contents: Read-only. It is prompted securely during image creation. See the shopperdb server README for token creation and rotation instructions.
+`SERVER_URL` defaults to `https://shopperdb.com` and the scripts fill it in for you. Change it only to point a test station at a development server.
+
+### Store web address
+
+A store with a name, city and state gets its own subdomain, e.g. `https://steves-wheels-and-deals-watertown-ct.shopperdb.com`. The scripts propose an address and ask you to confirm it:
+
+```
+  Proposed store address (36/63 characters):
+    https://steves-wheels-and-deals-watertown-ct.shopperdb.com
+
+Press Enter to accept, or type a different address:
+```
+
+The 63-character cap is the DNS limit for a single label. When a name is too long, only the name is shortened - at a word boundary - so the city and state that distinguish two stores of the same name always survive. Nothing is shortened silently: the proposal is a suggestion until you accept it.
+
+**You confirm an address once.** It is saved with the store name, city and state, and every later card for that same store reuses it without asking. Changing any of those three, or passing `--reconfirm-address` / `-ReconfirmAddress`, brings the prompt back.
+
+Use `--print-slug` / `-PrintSlug` to see what address a store would get without touching a card:
+
+```bash
+./create-image.sh --print-slug --store-name "Steve's Wheels and Deals" --store-city Watertown --store-state CT
+```
 
 **Optional fields:**
 
@@ -173,7 +199,7 @@ The `GITHUB_PAT` is a GitHub fine-grained token scoped to `shopperdb` with Conte
 | `STORE_NAME` | *(blank)* | Display name for this station's public inventory page (e.g. `"Steve's Wheels and Deals"`). Use double quotes if the name contains spaces or an apostrophe. A store page is auto-created when the admin accepts the station. Leave blank to skip. |
 | `STORE_CITY` | *(blank)* | Store city, used to build the store's web address. |
 | `STORE_STATE` | *(blank)* | Store state, 2 letters, used to build the store's web address. |
-| `STORE_SLUG` | *(blank)* | The confirmed web address label (the part before the domain). The server uses it as given rather than deriving one. Capped at 63 characters because it is a subdomain name. Blank means the server derives one from `STORE_NAME`. |
+| `STORE_SLUG` | *(blank)* | The confirmed web address label (the part before the domain). The server uses it as given rather than deriving one, so the address is exactly what was approved at imaging time. Capped at 63 characters because it is a subdomain name. Blank means the server derives one from `STORE_NAME`. |
 | `SKIP_STORE_CREATE` | `false` | Set to `true` to suppress public store page creation entirely. The address fields are then ignored. |
 | `SKIP_TEST_PRINT` | `false` | Set to `true` to skip the printer test label during first provisioning. Useful if the label printer is not yet connected, or to verify the rest of setup before printing. Can also be set in `client/.env` for subsequent re-provision runs. |
 | `WIFI_SSID` / `WIFI_PASSWORD` | *(blank)* | WiFi credentials. Leave blank for Ethernet-only deployments. |

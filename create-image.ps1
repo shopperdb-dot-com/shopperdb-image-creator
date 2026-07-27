@@ -62,14 +62,18 @@
     System locale written to /etc/locale.gen. Default: en_US.UTF-8
 
 .PARAMETER ServerUrl
-    Server URL for initial registration. Example: http://192.168.2.100:8000
+    Overrides the server the station registers with. Default: https://shopperdb.com.
+    Use only to point a test card at a local dev server, e.g. http://192.168.2.100:8000.
+    Never remembered between runs, so a dev URL cannot ship on a later card.
 
 .PARAMETER RegistrationSecret
-    Shared secret provided by the server administrator. Prompted securely if omitted.
+    Registration secret supplied by ShopperDB. Prompted securely if omitted, then saved
+    encrypted so later runs reuse it.
 
 .PARAMETER GithubPat
-    GitHub fine-grained PAT with read-only Contents access to the shopperdb
-    repo. Used by the Pi to clone and pull updates. Prompted securely if not supplied.
+    GitHub access token supplied by ShopperDB. The Pi uses it to download and update its
+    software. Prompted securely if not supplied, then saved encrypted for later runs.
+    You do not create this token yourself - use the one you were given.
 
 .PARAMETER AdminSshKeyPath
     Admin SSH public key file. Enables passwordless SSH on the Pi.
@@ -92,7 +96,12 @@
 .PARAMETER StoreSlug
     The store's web address label (the part before the domain). Normally you confirm the
     proposed address at the prompt; pass this to set it outright and skip the prompt. Capped at
-    63 characters because it is a subdomain name. Not saved between runs - it names one store.
+    63 characters because it is a subdomain name. Saved between runs alongside the store name,
+    city and state, and reused as long as those three are unchanged.
+
+.PARAMETER ReconfirmAddress
+    Ask about the store web address again even when the saved one still applies. Normally the
+    address is confirmed once and then reused for every later card for the same store.
 
 .PARAMETER PrintSlug
     Print the proposed store address for -StoreName/-StoreCity/-StoreState and exit, without
@@ -166,6 +175,7 @@ param(
     [string]$StoreCity,
     [string]$StoreState,
     [string]$StoreSlug,
+    [switch]$ReconfirmAddress,
     [switch]$PrintSlug,
     [switch]$SkipStoreCreate,
     [switch]$SkipTestPrint,
@@ -201,6 +211,15 @@ function Fail { param([string]$m) Write-Host "  XX $m" -ForegroundColor Red; exi
 # copy exists only to let the address be chosen and checked at imaging time, with no network.
 $script:SlugMaxLength = 63
 $script:ReservedSlugs = @('www', 'admin', 'api', 'mail', 'ftp', 'static', 'media', 'app')
+
+# The public domain stores are reachable under. Deliberately independent of ServerUrl: a card
+# built against a local dev server still shows the production address, because that is where the
+# store will actually live once it is accepted.
+$script:StoreDomain = 'shopperdb.com'
+
+# Cards are built for the production site. -ServerUrl overrides it for local testing; the
+# override is never remembered between runs, so a dev URL cannot silently ship on a real card.
+$script:DefaultServerUrl = 'https://shopperdb.com'
 
 function ConvertTo-Slug {
     # Lowercase, drop apostrophes, reduce anything else to single hyphens, trim the ends.
@@ -557,11 +576,13 @@ if ($PrintSlug) {
 # Apply saved non-sensitive values for any param that was not explicitly provided.
 # SkipTestPrint and SkipStoreCreate are intentionally excluded: they are one-time
 # run flags (default false), not persistent preferences. Omitting them on the
-# command line always means false, never the last cached value. StoreSlug is excluded
-# for a different reason: it belongs to one store, so reusing it would collide.
+# command line always means false, never the last cached value. ServerUrl is excluded
+# so a -ServerUrl override used for one test card cannot linger (see $script:DefaultServerUrl).
+# StoreSlug is excluded here but handled below: it is restored only when the store identity
+# it was confirmed for is unchanged.
 foreach ($k in @('ImagePath','Hostname','Username','Timezone','KeyboardLayout',
                   'WifiSsid','WifiCountry','WifiSecurity','WifiHidden','Locale',
-                  'ServerUrl','AdminSshKeyPath','StoreName','StoreCity','StoreState',
+                  'AdminSshKeyPath','StoreName','StoreCity','StoreState',
                   'StaticIp','StaticGateway','StaticPrefix','StaticDns')) {
     if (-not $_explicitParams.Contains($k)) {
         $saved = if ($_cfg.ContainsKey($k)) { $_cfg[$k] } else { $null }
@@ -571,6 +592,14 @@ foreach ($k in @('ImagePath','Hostname','Username','Timezone','KeyboardLayout',
         }
     }
 }
+
+# The store identity from the previous run, kept separate from the working values so the two
+# can be compared. If the name/city/state are unchanged, the address confirmed last time still
+# applies and is reused rather than asked about again.
+$_savedStoreName  = if ($_cfg.ContainsKey('StoreName'))  { [string]$_cfg['StoreName'] }  else { '' }
+$_savedStoreCity  = if ($_cfg.ContainsKey('StoreCity'))  { [string]$_cfg['StoreCity'] }  else { '' }
+$_savedStoreState = if ($_cfg.ContainsKey('StoreState')) { [string]$_cfg['StoreState'] } else { '' }
+$_savedStoreSlug  = if ($_cfg.ContainsKey('StoreSlug'))  { [string]$_cfg['StoreSlug'] }  else { '' }
 
 # Stash saved encrypted values - used later in prompts
 $_savedWifiPwEnc     = if ($_cfg.ContainsKey('WifiPasswordEnc'))       { $_cfg['WifiPasswordEnc'] }       else { '' }
@@ -637,7 +666,7 @@ if (-not $GithubPat) {
         Ok "GitHub PAT: using saved value"
     } else {
         if ($_savedGithubPatEnc) { Warn "Saved GitHub PAT could not be decrypted (saved on another machine) - please re-enter" }
-        $GithubPat = Read-Secure "GitHub PAT (shopperdb-fleet-deploy, read-only Contents)"
+        $GithubPat = Read-Secure "GitHub access token (provided by ShopperDB)"
     }
 }
 if (-not $GithubPat) { Fail "GITHUB_PAT is required." }
@@ -700,23 +729,19 @@ if ($fullMode) {
     }
 }
 
-# Server URL - saved config, then auto-detect + prompt
-if (-not $ServerUrl) {
-    $defaultUrl = ""
-    $localIp = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.IPAddress -notmatch "^(127\.|169\.254\.)" -and
-            $_.PrefixOrigin -in @("Dhcp","Manual") -and
-            $_.InterfaceAlias -notmatch "^(vEthernet|Loopback|Tunnel|isatap|Teredo)"
-        } |
-        Select-Object -First 1 -ExpandProperty IPAddress
-    if ($localIp) { $defaultUrl = "http://${localIp}:8000" }
-    $urlPrompt  = if ($defaultUrl) { "Server URL [$defaultUrl]" } else { "Server URL (e.g. http://192.168.2.100:8000)" }
-    $urlEntered = (Read-Host $urlPrompt).Trim()
-    $ServerUrl  = if ($urlEntered) { $urlEntered } else { $defaultUrl }
+# Server URL - the production site unless -ServerUrl points somewhere else. No prompt: for a
+# real card there is only one right answer, and asking every time invites a mistyped one.
+if (-not $ServerUrl) { $ServerUrl = $script:DefaultServerUrl }
+if ($ServerUrl -notmatch '^https?://') {
+    Fail "Server URL must start with http:// or https:// (got '$ServerUrl')"
 }
-if (-not $ServerUrl) { Fail "SERVER_URL is required." }
-Ok "Server URL: $ServerUrl"
+$ServerUrl = $ServerUrl.TrimEnd('/')
+if ($ServerUrl -eq $script:DefaultServerUrl) {
+    Ok "Server URL: $ServerUrl"
+} else {
+    # Loud on purpose: a card pointed at a laptop looks identical to a real one until it boots.
+    Warn "Server URL: $ServerUrl (override - the default is $($script:DefaultServerUrl))"
+}
 
 # Registration secret - saved fallback, then prompt
 if (-not $RegistrationSecret) {
@@ -774,6 +799,21 @@ if (-not $StoreName) {
     }
     $StoreState = $StoreState.ToUpperInvariant()
 
+    # An address accepted on an earlier run is reused without asking again: it was already
+    # confirmed, and a second card for the same store has to land on the same subdomain.
+    # Comparing the slugified inputs (not the raw text) means "watertown" and "Watertown" are
+    # the same answer, while any change that would actually move the address - a different
+    # name, city or state - drops through to a fresh confirmation. So does -ReconfirmAddress.
+    $addressReused = $false
+    if (-not $StoreSlug -and -not $ReconfirmAddress -and $_savedStoreSlug -and
+        (ConvertTo-Slug $StoreName)  -eq (ConvertTo-Slug $_savedStoreName)  -and
+        (ConvertTo-Slug $StoreCity)  -eq (ConvertTo-Slug $_savedStoreCity)  -and
+        (ConvertTo-Slug $StoreState) -eq (ConvertTo-Slug $_savedStoreState) -and
+        -not (Get-SlugProblem $_savedStoreSlug)) {
+        $StoreSlug = $_savedStoreSlug
+        $addressReused = $true
+    }
+
     # Confirm the web address. The proposal shortens only the store name when the whole thing
     # will not fit; nothing is applied without being shown and accepted.
     while ($true) {
@@ -781,7 +821,7 @@ if (-not $StoreName) {
             $proposed = New-SlugProposal $StoreName $StoreCity $StoreState
             Write-Host ""
             Write-Host ("  Proposed store address ({0}/{1} characters):" -f $proposed.Length, $script:SlugMaxLength)
-            Write-Host ("    https://{0}.<your-domain>" -f $proposed) -ForegroundColor Cyan
+            Write-Host ("    https://{0}.{1}" -f $proposed, $script:StoreDomain) -ForegroundColor Cyan
             Write-Host ""
             $entered = (Read-Host "Press Enter to accept, or type a different address").Trim()
             # Normalize what was typed (case, spaces, punctuation). Length is never adjusted -
@@ -793,8 +833,15 @@ if (-not $StoreName) {
         if ($_explicitParams.Contains('StoreSlug')) { Fail $problem }
         Warn $problem
         $StoreSlug = ""
+        $addressReused = $false
     }
-    Ok ("Store address: {0} ({1}/{2} characters)" -f $StoreSlug, $StoreSlug.Length, $script:SlugMaxLength)
+    if ($addressReused) {
+        Ok ("Store address: https://{0}.{1} (confirmed on an earlier run - -ReconfirmAddress to change it)" -f
+            $StoreSlug, $script:StoreDomain)
+    } else {
+        Ok ("Store address: https://{0}.{1} ({2}/{3} characters)" -f
+            $StoreSlug, $script:StoreDomain, $StoreSlug.Length, $script:SlugMaxLength)
+    }
 }
 
 # WiFi password (only when a secured WiFi SSID is configured) - collected once here
@@ -1293,11 +1340,11 @@ $newCfg = [ordered]@{
     WifiSecurity          = $WifiSecurity
     WifiHidden            = [bool]$WifiHidden
     Locale                = $Locale
-    ServerUrl             = $ServerUrl
     AdminSshKeyPath       = $AdminSshKeyPath
     StoreName             = $StoreName
     StoreCity             = $StoreCity
     StoreState            = $StoreState
+    StoreSlug             = $StoreSlug
     StaticIp              = $StaticIp
     StaticGateway         = $StaticGateway
     StaticPrefix          = $StaticPrefix

@@ -734,6 +734,92 @@ class TestStoreAddress:
         assert bash_out == ps_out
 
 
+PRODUCTION_URL = "https://shopperdb.com"
+
+
+class TestServerUrlBothImplementations:
+    """Checked statically so the PowerShell side is covered on Windows too, where bash is skipped."""
+
+    def test_both_default_to_production(self):
+        assert f'DEFAULT_SERVER_URL="{PRODUCTION_URL}"' in CREATE_SH.read_text()
+        assert f"$script:DefaultServerUrl = '{PRODUCTION_URL}'" in CREATE_PS1.read_text()
+
+    def test_neither_caches_the_override(self):
+        sh = CREATE_SH.read_text()
+        assert "_load_saved ServerUrl" not in sh
+        assert '"ServerUrl":       "_D_SERVER_URL"' not in sh
+        ps1 = CREATE_PS1.read_text()
+        assert "ServerUrl             = $ServerUrl" not in ps1
+        assert "'ServerUrl','AdminSshKeyPath'" not in ps1
+
+    def test_the_store_domain_is_shown_in_the_proposal(self):
+        assert 'STORE_DOMAIN="shopperdb.com"' in CREATE_SH.read_text()
+        assert "$script:StoreDomain = 'shopperdb.com'" in CREATE_PS1.read_text()
+
+    def test_both_offer_a_reconfirm_escape_hatch(self):
+        assert "--reconfirm-address" in CREATE_SH.read_text()
+        assert "$ReconfirmAddress" in CREATE_PS1.read_text()
+
+
+@pytest.mark.bash
+class TestServerUrl:
+    """Cards are built for the production site; the dev override must never be sticky.
+
+    A card pointed at a laptop is indistinguishable from a real one until it boots and fails
+    to register, so the default is fixed and any override is announced.
+    """
+
+    def test_defaults_to_production_without_being_asked(self, tmp_path):
+        boot = _boot(tmp_path)
+        result = _run_provision(boot, "--store-name", "")
+        assert result.returncode == 0, result.stderr
+        assert f"SERVER_URL={PRODUCTION_URL}" in (boot / "station.conf").read_text()
+
+    def test_flag_overrides_the_default(self, tmp_path):
+        boot = _boot(tmp_path)
+        result = _run_provision(boot, "--store-name", "", "--server-url", "http://192.168.2.100:8000")
+        assert result.returncode == 0, result.stderr
+        assert "SERVER_URL=http://192.168.2.100:8000" in (boot / "station.conf").read_text()
+
+    def test_an_override_is_announced(self, tmp_path):
+        boot = _boot(tmp_path)
+        result = _run_provision(boot, "--store-name", "", "--server-url", "http://192.168.2.100:8000")
+        assert "override" in result.stdout.lower()
+
+    def test_a_url_without_a_scheme_is_rejected(self, tmp_path):
+        boot = _boot(tmp_path)
+        result = _run_provision(boot, "--store-name", "", "--server-url", "192.168.2.100:8000")
+        assert result.returncode != 0
+        assert not (boot / "station.conf").exists()
+
+    def test_a_trailing_slash_is_trimmed(self, tmp_path):
+        boot = _boot(tmp_path)
+        result = _run_provision(boot, "--store-name", "", "--server-url", "https://shopperdb.com/")
+        assert result.returncode == 0, result.stderr
+        assert f"SERVER_URL={PRODUCTION_URL}\n" in (boot / "station.conf").read_text()
+
+    def test_the_override_is_not_remembered(self, tmp_path):
+        """The whole point: a dev URL used once must not ship on the next real card."""
+        boot = _boot(tmp_path)
+        _run_provision(boot, "--store-name", "", "--server-url", "http://192.168.2.100:8000")
+        saved = json.loads(_DEFAULTS_FILE.read_text(encoding="utf-8-sig"))
+        assert "ServerUrl" not in saved
+
+        boot2 = _boot(tmp_path / "second")
+        result = _run_provision(boot2, "--store-name", "")
+        assert result.returncode == 0, result.stderr
+        assert f"SERVER_URL={PRODUCTION_URL}" in (boot2 / "station.conf").read_text()
+
+    def test_a_stale_cached_url_is_ignored_and_purged(self, tmp_path):
+        """Earlier versions cached ServerUrl - an existing one must not resurrect."""
+        boot = _boot(tmp_path)
+        _DEFAULTS_FILE.write_text(json.dumps({"ServerUrl": "http://192.168.2.100:8000"}, indent=2))
+        result = _run_provision(boot, "--store-name", "")
+        assert result.returncode == 0, result.stderr
+        assert f"SERVER_URL={PRODUCTION_URL}" in (boot / "station.conf").read_text()
+        assert "ServerUrl" not in json.loads(_DEFAULTS_FILE.read_text(encoding="utf-8-sig"))
+
+
 class TestStoreAddressInConf:
     """station.conf.example and the writers must carry the address fields."""
 
@@ -749,10 +835,154 @@ class TestStoreAddressInConf:
     def test_powershell_writer_emits_the_field(self, field):
         assert f"{field}=" in CREATE_PS1.read_text()
 
-    def test_address_is_not_saved_between_runs(self):
-        """City/state are remembered; the address is not - it names one store, so reusing it
-        for the next card would collide."""
-        content = CREATE_SH.read_text()
-        assert "_load_saved StoreCity" in content
-        assert "_load_saved StoreState" in content
-        assert "_load_saved StoreSlug" not in content
+    def test_address_is_saved_between_runs(self):
+        """The confirmed address is remembered so later cards for the same store reuse it."""
+        assert '"StoreSlug":       "_D_STORE_SLUG"' in CREATE_SH.read_text()
+        assert "StoreSlug             = $StoreSlug" in CREATE_PS1.read_text()
+
+
+def _boot(tmp_path):
+    boot = tmp_path / "bootfs"
+    boot.mkdir(parents=True)
+    (boot / "cmdline.txt").write_text("console=serial0,115200 root=/dev/mmcblk0p2\n")
+    return boot
+
+
+def _run_provision(boot, *extra):
+    """Provision-only run with no terminal attached.
+
+    Prompts read /dev/tty, so a run that needs to ask something fails here instead of hanging.
+    That makes "did it prompt?" directly observable: a successful run asked nothing.
+    """
+    return subprocess.run(
+        [
+            "bash",
+            str(CREATE_SH),
+            "--boot-mount",
+            str(boot),
+            "--registration-secret",
+            "test-secret",
+            "--github-pat",
+            "ghp_testtoken123",
+            "--admin-ssh-key",
+            "",
+            *extra,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        stdin=subprocess.DEVNULL,
+    )
+
+
+STORE_ARGS = ("--store-name", "Steve's Wheels and Deals", "--store-city", "Watertown", "--store-state", "CT")
+STORE_SLUG = "steves-wheels-and-deals-watertown-ct"
+
+
+@pytest.mark.bash
+class TestStoreAddressIsRemembered:
+    """An address is confirmed once, then reused for every later card for the same store.
+
+    Re-confirming on every run is how a second card for one store ends up on a different
+    subdomain, so the saved value is reused unless something that would move it changed.
+    """
+
+    def _seed(self, **values):
+        _DEFAULTS_FILE.write_text(json.dumps(values, indent=2))
+
+    def test_saved_address_is_reused_without_asking(self, tmp_path):
+        boot = _boot(tmp_path)
+        self._seed(
+            StoreName="Steve's Wheels and Deals",
+            StoreCity="Watertown",
+            StoreState="CT",
+            StoreSlug=STORE_SLUG,
+        )
+        result = _run_provision(boot)
+        assert result.returncode == 0, result.stderr
+        assert f'STORE_SLUG="{STORE_SLUG}"' in (boot / "station.conf").read_text()
+        assert "Proposed store address" not in result.stdout
+
+    def test_a_differently_cased_city_is_the_same_answer(self, tmp_path):
+        """Inputs are compared slugified, so "watertown" does not count as a change."""
+        boot = _boot(tmp_path)
+        self._seed(
+            StoreName="Steve's Wheels and Deals",
+            StoreCity="Watertown",
+            StoreState="CT",
+            StoreSlug=STORE_SLUG,
+        )
+        result = _run_provision(boot, "--store-city", "watertown")
+        assert result.returncode == 0, result.stderr
+        assert f'STORE_SLUG="{STORE_SLUG}"' in (boot / "station.conf").read_text()
+
+    @pytest.mark.parametrize(
+        ("flag", "value"),
+        [("--store-city", "Hartford"), ("--store-state", "MA"), ("--store-name", "Different Store")],
+    )
+    def test_changing_the_store_identity_asks_again(self, tmp_path, flag, value):
+        boot = _boot(tmp_path)
+        self._seed(
+            StoreName="Steve's Wheels and Deals",
+            StoreCity="Watertown",
+            StoreState="CT",
+            StoreSlug=STORE_SLUG,
+        )
+        result = _run_provision(boot, flag, value)
+        assert result.returncode != 0, "a moved address must be re-confirmed, not reused"
+        assert not (boot / "station.conf").exists()
+
+    def test_reconfirm_flag_asks_again(self, tmp_path):
+        boot = _boot(tmp_path)
+        self._seed(
+            StoreName="Steve's Wheels and Deals",
+            StoreCity="Watertown",
+            StoreState="CT",
+            StoreSlug=STORE_SLUG,
+        )
+        result = _run_provision(boot, "--reconfirm-address")
+        assert result.returncode != 0
+        assert not (boot / "station.conf").exists()
+
+    def test_an_unusable_saved_address_is_not_reused(self, tmp_path):
+        """A hand-edited or over-long saved value must not slip through unvalidated."""
+        boot = _boot(tmp_path)
+        self._seed(
+            StoreName="Steve's Wheels and Deals",
+            StoreCity="Watertown",
+            StoreState="CT",
+            StoreSlug="a" * 64,
+        )
+        result = _run_provision(boot, *STORE_ARGS)
+        assert result.returncode != 0
+        assert not (boot / "station.conf").exists()
+
+    def test_explicit_slug_overrides_the_saved_one(self, tmp_path):
+        boot = _boot(tmp_path)
+        self._seed(
+            StoreName="Steve's Wheels and Deals",
+            StoreCity="Watertown",
+            StoreState="CT",
+            StoreSlug=STORE_SLUG,
+        )
+        result = _run_provision(boot, "--store-slug", "steves-wheels-hartford-ct")
+        assert result.returncode == 0, result.stderr
+        assert 'STORE_SLUG="steves-wheels-hartford-ct"' in (boot / "station.conf").read_text()
+
+    def test_defaults_written_with_a_bom_are_still_read(self, tmp_path):
+        """create-image.ps1 writes this file with a BOM; a plain utf-8 read fails on it
+        silently, making every saved value - including the address - look absent."""
+        boot = _boot(tmp_path)
+        payload = json.dumps(
+            {
+                "StoreName": "Steve's Wheels and Deals",
+                "StoreCity": "Watertown",
+                "StoreState": "CT",
+                "StoreSlug": STORE_SLUG,
+            },
+            indent=2,
+        )
+        _DEFAULTS_FILE.write_bytes(b"\xef\xbb\xbf" + payload.encode("utf-8"))
+        result = _run_provision(boot)
+        assert result.returncode == 0, result.stderr
+        assert f'STORE_SLUG="{STORE_SLUG}"' in (boot / "station.conf").read_text()
