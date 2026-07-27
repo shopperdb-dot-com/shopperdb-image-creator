@@ -10,14 +10,18 @@
 # This file is NOT checked into the repo. Use station.conf.example
 # as the template.
 
-# REQUIRED - Server registration secret (from server .env)
+# REQUIRED - Registration secret, supplied by ShopperDB
 REGISTRATION_SECRET=
 
-# REQUIRED - Server URL for initial registration (pre-VPN, LAN or public)
-SERVER_URL=
+# REQUIRED - The server this station registers with.
+# Use https://shopperdb.com unless you were told otherwise. create-image.sh /
+# create-image.ps1 fill this in for you; only change it to point a test station
+# at a development server.
+SERVER_URL=https://shopperdb.com
 
-# REQUIRED - GitHub fine-grained PAT with read-only Contents access to shopperdb
-# Create at: GitHub > Settings > Developer Settings > Personal Access Tokens > Fine-grained tokens
+# REQUIRED - GitHub access token, supplied by ShopperDB.
+# The station uses it to download and update its software. Paste the token you
+# were given; you do not create one yourself.
 GITHUB_PAT=
 
 # OPTIONAL - Admin SSH public key for passwordless login (recommended)
@@ -31,8 +35,23 @@ ADMIN_SSH_KEY=
 # Leave blank if this station should not have a public store page.
 STORE_NAME=
 
+# OPTIONAL - The store's web address, and the city/state it was built from.
+# STORE_SLUG is the label before the domain (e.g. the "acme-hartford-ct" in
+# https://acme-hartford-ct.example.com). The server uses it as given rather than
+# deriving one, so the address is exactly what was approved when the card was
+# written. It is a subdomain name, so it is capped at 63 characters and may hold
+# only lowercase letters, numbers and hyphens.
+#
+# create-image.sh / create-image.ps1 fill these in and have you confirm the
+# address once. Later cards for the same store reuse the confirmed address
+# without asking again. Leave blank to let the server derive one from STORE_NAME.
+STORE_CITY=
+STORE_STATE=
+STORE_SLUG=
+
 # OPTIONAL - Set to true to prevent a public store page from being created
 # for this station. Useful for internal/test deployments. Default: false.
+# When true, the store address fields above are ignored.
 SKIP_STORE_CREATE=false
 
 # OPTIONAL - Set to true to skip the printer test label during first provisioning.

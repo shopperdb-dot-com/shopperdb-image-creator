@@ -62,14 +62,18 @@
     System locale written to /etc/locale.gen. Default: en_US.UTF-8
 
 .PARAMETER ServerUrl
-    Server URL for initial registration. Example: http://192.168.2.100:8000
+    Overrides the server the station registers with. Default: https://shopperdb.com.
+    Use only to point a test card at a local dev server, e.g. http://192.168.2.100:8000.
+    Never remembered between runs, so a dev URL cannot ship on a later card.
 
 .PARAMETER RegistrationSecret
-    Shared secret provided by the server administrator. Prompted securely if omitted.
+    Registration secret supplied by ShopperDB. Prompted securely if omitted, then saved
+    encrypted so later runs reuse it.
 
 .PARAMETER GithubPat
-    GitHub fine-grained PAT with read-only Contents access to the shopperdb
-    repo. Used by the Pi to clone and pull updates. Prompted securely if not supplied.
+    GitHub access token supplied by ShopperDB. The Pi uses it to download and update its
+    software. Prompted securely if not supplied, then saved encrypted for later runs.
+    You do not create this token yourself - use the one you were given.
 
 .PARAMETER AdminSshKeyPath
     Admin SSH public key file. Enables passwordless SSH on the Pi.
@@ -81,8 +85,31 @@
     A store page is auto-created when the admin accepts the station.
     Saved between runs. Leave blank for no public store page.
 
+.PARAMETER StoreCity
+    City for this store, used in its web address. Prompted for when a store name is set.
+    Saved between runs.
+
+.PARAMETER StoreState
+    Two-letter state for this store, used in its web address. Prompted for when a store name
+    is set. Saved between runs.
+
+.PARAMETER StoreSlug
+    The store's web address label (the part before the domain). Normally you confirm the
+    proposed address at the prompt; pass this to set it outright and skip the prompt. Capped at
+    63 characters because it is a subdomain name. Saved between runs alongside the store name,
+    city and state, and reused as long as those three are unchanged.
+
+.PARAMETER ReconfirmAddress
+    Ask about the store web address again even when the saved one still applies. Normally the
+    address is confirmed once and then reused for every later card for the same store.
+
+.PARAMETER PrintSlug
+    Print the proposed store address for -StoreName/-StoreCity/-StoreState and exit, without
+    touching a card. Useful for checking an address before imaging.
+
 .PARAMETER SkipStoreCreate
     Set to $true to suppress public store page creation. Default: $false.
+    When set, the store address prompts are skipped: no store page means no address.
 
 .PARAMETER SkipTestPrint
     Skip the printer test label during first provisioning. Default: $false.
@@ -145,6 +172,11 @@ param(
     [string]$GithubPat,
     [string]$AdminSshKeyPath = "$env:USERPROFILE\.ssh\id_ed25519.pub",
     [string]$StoreName,
+    [string]$StoreCity,
+    [string]$StoreState,
+    [string]$StoreSlug,
+    [switch]$ReconfirmAddress,
+    [switch]$PrintSlug,
     [switch]$SkipStoreCreate,
     [switch]$SkipTestPrint,
     [switch]$LcdDisplay,
@@ -170,6 +202,94 @@ function Step { param([string]$m) Write-Host "  -> $m" -ForegroundColor Cyan }
 function Ok   { param([string]$m) Write-Host "  OK $m" -ForegroundColor Green }
 function Warn { param([string]$m) Write-Host "  ** $m" -ForegroundColor Yellow }
 function Fail { param([string]$m) Write-Host "  XX $m" -ForegroundColor Red; exit 1 }
+
+# ── Store web address (subdomain label) ───────────────────────────────────────
+# A store's address label is the DNS label of its subdomain, so it is capped at the RFC 1035
+# limit of 63 characters. These mirror validate_slug()/propose_slug() in the server's
+# db_manager.py, and the matching functions in create-image.sh. The SERVER remains the
+# authority - it re-validates on write and uses the label confirmed here verbatim - so this
+# copy exists only to let the address be chosen and checked at imaging time, with no network.
+$script:SlugMaxLength = 63
+$script:ReservedSlugs = @('www', 'admin', 'api', 'mail', 'ftp', 'static', 'media', 'app')
+
+# The public domain stores are reachable under. Deliberately independent of ServerUrl: a card
+# built against a local dev server still shows the production address, because that is where the
+# store will actually live once it is accepted.
+$script:StoreDomain = 'shopperdb.com'
+
+# Cards are built for the production site. -ServerUrl overrides it for local testing; the
+# override is never remembered between runs, so a dev URL cannot silently ship on a real card.
+$script:DefaultServerUrl = 'https://shopperdb.com'
+
+function ConvertTo-Slug {
+    # Lowercase, drop apostrophes, reduce anything else to single hyphens, trim the ends.
+    # Accents are decomposed first so "Cafe" comes out of "Café" rather than losing the letter.
+    param([string]$Text)
+    if (-not $Text) { return "" }
+    $decomposed = $Text.Normalize([Text.NormalizationForm]::FormKD)
+    $stripped = -join ($decomposed.ToCharArray() | Where-Object {
+        [Globalization.CharUnicodeInfo]::GetUnicodeCategory($_) -ne
+            [Globalization.UnicodeCategory]::NonSpacingMark
+    })
+    $s = $stripped.ToLowerInvariant() -replace "['’``]", ''
+    $s = $s -replace '[^a-z0-9]+', '-'
+    return $s.Trim('-')
+}
+
+function Get-SlugProblem {
+    # Return why $Slug cannot be used as a store address, or $null when it is fine.
+    param([string]$Slug)
+    if (-not $Slug)                       { return "Address cannot be empty." }
+    if ($Slug.Length -gt $script:SlugMaxLength) {
+        return ("Address is {0} characters; the maximum is {1} because it is a subdomain name." -f
+                $Slug.Length, $script:SlugMaxLength)
+    }
+    if ($Slug -cnotmatch '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$') {
+        return "Use lowercase letters, numbers and hyphens only, not starting or ending with a hyphen."
+    }
+    if ($Slug -like '*--*')               { return "Address cannot contain two hyphens in a row." }
+    if ($script:ReservedSlugs -contains $Slug) {
+        return "'$Slug' is reserved and cannot be used as a store address."
+    }
+    return $null
+}
+
+function New-SlugProposal {
+    # Build "<name>-<city>-<state>", shortening only the NAME if the whole thing will not fit.
+    # The city/state tail is what distinguishes two stores sharing a name, so it is never cut.
+    param([string]$Name, [string]$City, [string]$State)
+
+    $namePart = ConvertTo-Slug $Name
+    $tail = (@((ConvertTo-Slug $City), (ConvertTo-Slug $State)) | Where-Object { $_ }) -join '-'
+
+    $full = (@($namePart, $tail) | Where-Object { $_ }) -join '-'
+    if ($full.Length -le $script:SlugMaxLength) { return $full }
+
+    if (-not $tail) {
+        return $namePart.Substring(0, $script:SlugMaxLength).TrimEnd('-')
+    }
+
+    $budget = $script:SlugMaxLength - $tail.Length - 1
+    if ($budget -le 0) {
+        # A tail this long leaves no room for a name; keep what fits of the tail.
+        return $tail.Substring(0, [Math]::Min($tail.Length, $script:SlugMaxLength)).TrimEnd('-')
+    }
+
+    $clipped = $namePart.Substring(0, $budget)
+    # Prefer a whole word over a severed one, as long as something survives.
+    if ($clipped.Contains('-') -and $namePart.Length -gt $budget) {
+        $clipped = $clipped.Substring(0, $clipped.LastIndexOf('-'))
+    }
+    $clipped = $clipped.TrimEnd('-')
+    if ($clipped) { return "$clipped-$tail" }
+    return $tail
+}
+
+function Test-HasConsole {
+    # False when input is redirected (CI, a scripted build), where Read-Host returns empty
+    # forever. Callers check this instead of looping on a question nobody can answer.
+    try { return -not [Console]::IsInputRedirected } catch { return $false }
+}
 
 function Read-Secure {
     param([string]$Prompt)
@@ -447,13 +567,28 @@ function Read-DefaultSecure {
 $_cfg = if ($ResetDefaults) { @{} } else { Import-Conf }
 if ($ResetDefaults) { Ok "Saved defaults cleared (-ResetDefaults)" }
 
+# ── -PrintSlug: report the proposed store address and exit ────────────────────
+# A utility mode, not part of imaging: it answers "what would this store's web address be?"
+# without touching a card.
+if ($PrintSlug) {
+    if (-not $StoreName) { Fail "-PrintSlug needs -StoreName" }
+    $proposed = if ($StoreSlug) { $StoreSlug } else { New-SlugProposal $StoreName $StoreCity $StoreState }
+    $problem = Get-SlugProblem $proposed
+    if ($problem) { Fail $problem }
+    Write-Output $proposed
+    exit 0
+}
+
 # Apply saved non-sensitive values for any param that was not explicitly provided.
 # SkipTestPrint and SkipStoreCreate are intentionally excluded: they are one-time
 # run flags (default false), not persistent preferences. Omitting them on the
-# command line always means false, never the last cached value.
+# command line always means false, never the last cached value. ServerUrl is excluded
+# so a -ServerUrl override used for one test card cannot linger (see $script:DefaultServerUrl).
+# StoreSlug is excluded here but handled below: it is restored only when the store identity
+# it was confirmed for is unchanged.
 foreach ($k in @('ImagePath','Hostname','Username','Timezone','KeyboardLayout',
                   'WifiSsid','WifiCountry','WifiSecurity','WifiHidden','Locale',
-                  'ServerUrl','AdminSshKeyPath','StoreName',
+                  'AdminSshKeyPath','StoreName','StoreCity','StoreState',
                   'StaticIp','StaticGateway','StaticPrefix','StaticDns')) {
     if (-not $_explicitParams.Contains($k)) {
         $saved = if ($_cfg.ContainsKey($k)) { $_cfg[$k] } else { $null }
@@ -463,6 +598,14 @@ foreach ($k in @('ImagePath','Hostname','Username','Timezone','KeyboardLayout',
         }
     }
 }
+
+# The store identity from the previous run, kept separate from the working values so the two
+# can be compared. If the name/city/state are unchanged, the address confirmed last time still
+# applies and is reused rather than asked about again.
+$_savedStoreName  = if ($_cfg.ContainsKey('StoreName'))  { [string]$_cfg['StoreName'] }  else { '' }
+$_savedStoreCity  = if ($_cfg.ContainsKey('StoreCity'))  { [string]$_cfg['StoreCity'] }  else { '' }
+$_savedStoreState = if ($_cfg.ContainsKey('StoreState')) { [string]$_cfg['StoreState'] } else { '' }
+$_savedStoreSlug  = if ($_cfg.ContainsKey('StoreSlug'))  { [string]$_cfg['StoreSlug'] }  else { '' }
 
 # Stash saved encrypted values - used later in prompts
 $_savedWifiPwEnc     = if ($_cfg.ContainsKey('WifiPasswordEnc'))       { $_cfg['WifiPasswordEnc'] }       else { '' }
@@ -529,7 +672,7 @@ if (-not $GithubPat) {
         Ok "GitHub PAT: using saved value"
     } else {
         if ($_savedGithubPatEnc) { Warn "Saved GitHub PAT could not be decrypted (saved on another machine) - please re-enter" }
-        $GithubPat = Read-Secure "GitHub PAT (shopperdb-fleet-deploy, read-only Contents)"
+        $GithubPat = Read-Secure "GitHub access token (provided by ShopperDB)"
     }
 }
 if (-not $GithubPat) { Fail "GITHUB_PAT is required." }
@@ -592,23 +735,19 @@ if ($fullMode) {
     }
 }
 
-# Server URL - saved config, then auto-detect + prompt
-if (-not $ServerUrl) {
-    $defaultUrl = ""
-    $localIp = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.IPAddress -notmatch "^(127\.|169\.254\.)" -and
-            $_.PrefixOrigin -in @("Dhcp","Manual") -and
-            $_.InterfaceAlias -notmatch "^(vEthernet|Loopback|Tunnel|isatap|Teredo)"
-        } |
-        Select-Object -First 1 -ExpandProperty IPAddress
-    if ($localIp) { $defaultUrl = "http://${localIp}:8000" }
-    $urlPrompt  = if ($defaultUrl) { "Server URL [$defaultUrl]" } else { "Server URL (e.g. http://192.168.2.100:8000)" }
-    $urlEntered = (Read-Host $urlPrompt).Trim()
-    $ServerUrl  = if ($urlEntered) { $urlEntered } else { $defaultUrl }
+# Server URL - the production site unless -ServerUrl points somewhere else. No prompt: for a
+# real card there is only one right answer, and asking every time invites a mistyped one.
+if (-not $ServerUrl) { $ServerUrl = $script:DefaultServerUrl }
+if ($ServerUrl -notmatch '^https?://') {
+    Fail "Server URL must start with http:// or https:// (got '$ServerUrl')"
 }
-if (-not $ServerUrl) { Fail "SERVER_URL is required." }
-Ok "Server URL: $ServerUrl"
+$ServerUrl = $ServerUrl.TrimEnd('/')
+if ($ServerUrl -eq $script:DefaultServerUrl) {
+    Ok "Server URL: $ServerUrl"
+} else {
+    # Loud on purpose: a card pointed at a laptop looks identical to a real one until it boots.
+    Warn "Server URL: $ServerUrl (override - the default is $($script:DefaultServerUrl))"
+}
 
 # Registration secret - saved fallback, then prompt
 if (-not $RegistrationSecret) {
@@ -639,11 +778,92 @@ if ($AdminSshKeyPath -ne "" -and (Test-Path $AdminSshKeyPath -ErrorAction Silent
 }
 
 # Store display name (optional)
-if (-not $_explicitParams.Contains('StoreName') -and -not $StoreName) {
+if (-not $_explicitParams.Contains('StoreName') -and -not $StoreName -and (Test-HasConsole)) {
     $entered = (Read-Host "Store display name (optional - Enter to skip)").Trim()
     if ($entered) { $StoreName = $entered }
 }
-if ($StoreName) { Ok "Store name: $StoreName" } else { Ok "Store name: (none - no public store page)" }
+if (-not $StoreName) {
+    Ok "Store name: (none - no public store page)"
+} elseif ($SkipStoreCreate) {
+    Ok "Store name: $StoreName"
+    Ok "Store address: (none - SkipStoreCreate is set, so no store page is created)"
+    $StoreCity = ""; $StoreState = ""; $StoreSlug = ""
+} else {
+    Ok "Store name: $StoreName"
+
+    # A state passed on the command line is checked here, where the value came from a parameter
+    # and re-asking is not an option.
+    if ($StoreState -and $StoreState -notmatch '^[A-Za-z]{2}$') {
+        Fail "Store state must be 2 letters (got '$StoreState')"
+    }
+    $StoreState = $StoreState.ToUpperInvariant()
+
+    if (Test-HasConsole) {
+        # City and state are part of the address because they are what distinguishes two stores
+        # sharing a name. Collected here so the address can be confirmed before the card is written.
+        if (-not $_explicitParams.Contains('StoreCity') -and -not $StoreCity) {
+            $StoreCity = (Read-Host "Store city").Trim()
+        }
+        while ($StoreState -notmatch '^[A-Za-z]{2}$') {
+            $StoreState = (Read-Host "Store state (2 letters)").Trim()
+            if ($StoreState -notmatch '^[A-Za-z]{2}$') { Warn "State must be exactly 2 letters." }
+        }
+        $StoreState = $StoreState.ToUpperInvariant()
+    }
+
+    # An address accepted on an earlier run is reused without asking again: it was already
+    # confirmed, and a second card for the same store has to land on the same subdomain.
+    # Comparing the slugified inputs (not the raw text) means "watertown" and "Watertown" are
+    # the same answer, while any change that would actually move the address - a different
+    # name, city or state - drops through to a fresh confirmation. So does -ReconfirmAddress.
+    $addressReused = $false
+    if (-not $StoreSlug -and -not $ReconfirmAddress -and $_savedStoreSlug -and
+        (ConvertTo-Slug $StoreName)  -eq (ConvertTo-Slug $_savedStoreName)  -and
+        (ConvertTo-Slug $StoreCity)  -eq (ConvertTo-Slug $_savedStoreCity)  -and
+        (ConvertTo-Slug $StoreState) -eq (ConvertTo-Slug $_savedStoreState) -and
+        -not (Get-SlugProblem $_savedStoreSlug)) {
+        $StoreSlug = $_savedStoreSlug
+        $addressReused = $true
+    }
+
+    # Without a console there is nobody to confirm an address, so none is invented. Whatever
+    # city/state were passed still travel to the server, which derives the address itself and
+    # refuses anything that would not resolve.
+    if (-not $StoreSlug -and -not (Test-HasConsole)) {
+        Warn "No console to confirm the store address - the server will derive one from the name, city and state."
+    }
+
+    # Confirm the web address. The proposal shortens only the store name when the whole thing
+    # will not fit; nothing is applied without being shown and accepted.
+    while ($StoreSlug -or (Test-HasConsole)) {
+        if (-not $StoreSlug) {
+            $proposed = New-SlugProposal $StoreName $StoreCity $StoreState
+            Write-Host ""
+            Write-Host ("  Proposed store address ({0}/{1} characters):" -f $proposed.Length, $script:SlugMaxLength)
+            Write-Host ("    https://{0}.{1}" -f $proposed, $script:StoreDomain) -ForegroundColor Cyan
+            Write-Host ""
+            $entered = (Read-Host "Press Enter to accept, or type a different address").Trim()
+            # Normalize what was typed (case, spaces, punctuation). Length is never adjusted -
+            # a too-long address is reported so a person decides what to shorten.
+            $StoreSlug = if ($entered) { ConvertTo-Slug $entered } else { $proposed }
+        }
+        $problem = Get-SlugProblem $StoreSlug
+        if (-not $problem) { break }
+        if ($_explicitParams.Contains('StoreSlug')) { Fail $problem }
+        Warn $problem
+        $StoreSlug = ""
+        $addressReused = $false
+    }
+    if (-not $StoreSlug) {
+        Ok "Store address: (none confirmed - the server will derive one)"
+    } elseif ($addressReused) {
+        Ok ("Store address: https://{0}.{1} (confirmed on an earlier run - -ReconfirmAddress to change it)" -f
+            $StoreSlug, $script:StoreDomain)
+    } else {
+        Ok ("Store address: https://{0}.{1} ({2}/{3} characters)" -f
+            $StoreSlug, $script:StoreDomain, $StoreSlug.Length, $script:SlugMaxLength)
+    }
+}
 
 # WiFi password (only when a secured WiFi SSID is configured) - collected once here
 if ($WifiSsid -and $WifiSecurity -ne "open" -and -not $WifiPassword) {
@@ -1075,6 +1295,14 @@ $adminLine      = if ($adminSshKey)  { "ADMIN_SSH_KEY='$adminSshKey'" }   else {
 $wifiPassLine   = if ($WifiPassword) { "WIFI_PASSWORD='$WifiPassword'" }  else { "WIFI_PASSWORD=" }
 # Double-quote the store name so apostrophes and spaces survive bash source
 $storeNameLine  = if ($StoreName)    { "STORE_NAME=`"${StoreName}`"" }    else { "STORE_NAME=" }
+$storeAddrLines = @(
+    "# The confirmed store web address, and the city/state it was built from. The server"
+    "# uses STORE_SLUG as given rather than deriving one, so the address is what was"
+    "# approved at imaging time."
+    "STORE_CITY=`"${StoreCity}`""
+    "STORE_STATE=`"${StoreState}`""
+    "STORE_SLUG=`"${StoreSlug}`""
+) -join "`n"
 $skipStoreLine    = "SKIP_STORE_CREATE=" + ($SkipStoreCreate.ToString().ToLower())
 $skipPrintLine    = "SKIP_TEST_PRINT="   + ($SkipTestPrint.ToString().ToLower())
 $lcdDisplayLine   = "LCD_DISPLAY="       + ($LcdDisplay.ToString().ToLower())
@@ -1098,6 +1326,7 @@ $adminLine
 # OPTIONAL - Store display name for this Pi's public inventory page.
 # If set, a store page is auto-created when the admin accepts the station.
 $storeNameLine
+$storeAddrLines
 $skipStoreLine
 $skipPrintLine
 
@@ -1132,9 +1361,11 @@ $newCfg = [ordered]@{
     WifiSecurity          = $WifiSecurity
     WifiHidden            = [bool]$WifiHidden
     Locale                = $Locale
-    ServerUrl             = $ServerUrl
     AdminSshKeyPath       = $AdminSshKeyPath
     StoreName             = $StoreName
+    StoreCity             = $StoreCity
+    StoreState            = $StoreState
+    StoreSlug             = $StoreSlug
     StaticIp              = $StaticIp
     StaticGateway         = $StaticGateway
     StaticPrefix          = $StaticPrefix
