@@ -7,6 +7,13 @@ station.conf text eol=lf
 *.ps1 text eol=crlf
 *.bat text eol=crlf
 
+# Tab-separated data read field-by-field by awk. A CRLF checkout would leave a stray carriage
+# return on the last field of every row, so every city would come back as "Watertown\r".
+*.tsv text eol=lf
+
+# Parsed by CI to tag the release.
+VERSION text eol=lf
+
 # Sensible defaults
 *.py text eol=lf
 *.md text eol=lf

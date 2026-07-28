@@ -103,6 +103,10 @@
     Ask about the store web address again even when the saved one still applies. Normally the
     address is confirmed once and then reused for every later card for the same store.
 
+.PARAMETER CheckPlace
+    Print the canonical spelling of -StoreCity/-StoreState and exit, without touching a card.
+    Fails when the city/state pair is not a known US place.
+
 .PARAMETER PrintSlug
     Print the proposed store address for -StoreName/-StoreCity/-StoreState and exit, without
     touching a card. Useful for checking an address before imaging.
@@ -177,6 +181,7 @@ param(
     [string]$StoreSlug,
     [switch]$ReconfirmAddress,
     [switch]$PrintSlug,
+    [switch]$CheckPlace,
     [switch]$SkipStoreCreate,
     [switch]$SkipTestPrint,
     [switch]$LcdDisplay,
@@ -283,6 +288,94 @@ function New-SlugProposal {
     $clipped = $clipped.TrimEnd('-')
     if ($clipped) { return "$clipped-$tail" }
     return $tail
+}
+
+# ── US city/state validation ──────────────────────────────────────────────────
+# data/us-places.tsv is generated from the US Census Gazetteer (public domain) by
+# tools/build_us_places.py. It ships with the repo so this works with no network, no API key and
+# no rate limit. A typed city is checked against it and replaced with the canonical spelling; the
+# city feeds the store's web address, so a typo there becomes a permanent part of the subdomain.
+$script:PlacesFile = Join-Path $PSScriptRoot "data/us-places.tsv"
+# Declared up front: Set-StrictMode makes reading an unassigned variable an error, and the cache
+# check below reads these before Initialize-PlaceTable has run.
+$script:PlaceTable = $null
+$script:PlaceStates = $null
+$script:PlaceRows = $null
+
+function Get-PlaceKey {
+    # Fold a place name to the dataset's lookup key. Must agree with place_key in create-image.sh
+    # and normalize_key in tools/build_us_places.py.
+    param([string]$Text)
+    if (-not $Text) { return "" }
+    $decomposed = $Text.Normalize([Text.NormalizationForm]::FormKD)
+    $stripped = -join ($decomposed.ToCharArray() | Where-Object {
+        [Globalization.CharUnicodeInfo]::GetUnicodeCategory($_) -ne
+            [Globalization.UnicodeCategory]::NonSpacingMark
+    })
+    $s = $stripped.ToLowerInvariant() -replace '[^a-z0-9]', ' '
+    $words = $s.Split(' ', [StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object {
+        switch ($_) {
+            'saint'  { 'st' }
+            'sainte' { 'ste' }
+            'mount'  { 'mt' }
+            'fort'   { 'ft' }
+            default  { $_ }
+        }
+    }
+    return ($words -join ' ')
+}
+
+function Initialize-PlaceTable {
+    # Loaded once and cached: the file is ~32k rows, so re-reading it per lookup would be felt.
+    if ($null -ne $script:PlaceTable) { return }
+    $script:PlaceTable = @{}
+    $script:PlaceStates = [System.Collections.Generic.HashSet[string]]::new()
+    $script:PlaceRows = [System.Collections.Generic.List[string[]]]::new()
+    if (-not (Test-Path $script:PlacesFile)) { return }
+    foreach ($line in [IO.File]::ReadLines($script:PlacesFile)) {
+        if (-not $line -or $line.StartsWith('#')) { continue }
+        $p = $line.Split("`t")
+        if ($p.Count -lt 3) { continue }
+        $p[2] = $p[2].TrimEnd()   # tolerate a CRLF checkout of the data file
+        $script:PlaceTable["$($p[0])|$($p[1])"] = $p[2]
+        [void]$script:PlaceStates.Add($p[1])
+        $script:PlaceRows.Add($p)
+    }
+}
+
+function Test-PlacesFileAvailable {
+    Initialize-PlaceTable
+    return $script:PlaceRows.Count -gt 0
+}
+
+function Get-CanonicalPlace {
+    # Return the canonical spelling of city key $Key in $State, or $null when it is not listed.
+    param([string]$Key, [string]$State)
+    Initialize-PlaceTable
+    $hit = $script:PlaceTable["$Key|$State"]
+    if ($hit) { return $hit }
+    return $null
+}
+
+function Test-KnownState {
+    param([string]$State)
+    Initialize-PlaceTable
+    if ($script:PlaceRows.Count -eq 0) { return $true }
+    return $script:PlaceStates.Contains($State)
+}
+
+function Get-PlaceSuggestions {
+    # Up to 5 places in the same state that look like what was typed - enough to spot a typo.
+    param([string]$Key, [string]$State)
+    Initialize-PlaceTable
+    $prefix = if ($Key.Length -ge 3) { $Key.Substring(0, 3) } else { $null }
+    $hits = foreach ($row in $script:PlaceRows) {
+        if ($row[1] -ne $State) { continue }
+        if ($row[0].StartsWith($Key) -or $Key.StartsWith($row[0]) -or ($prefix -and $row[0].StartsWith($prefix))) {
+            $row[2]
+        }
+    }
+    return ($hits | Sort-Object -Unique | Select-Object -First 5)
 }
 
 function Test-HasConsole {
@@ -567,6 +660,17 @@ function Read-DefaultSecure {
 $_cfg = if ($ResetDefaults) { @{} } else { Import-Conf }
 if ($ResetDefaults) { Ok "Saved defaults cleared (-ResetDefaults)" }
 
+# ── -CheckPlace: report the canonical spelling of a city/state and exit ───────
+if ($CheckPlace) {
+    if (-not $StoreCity -or -not $StoreState) { Fail "-CheckPlace needs -StoreCity and -StoreState" }
+    $st = $StoreState.ToUpperInvariant()
+    if (-not (Test-KnownState $st)) { Fail "'$st' is not a US state code." }
+    $canonical = Get-CanonicalPlace (Get-PlaceKey $StoreCity) $st
+    if (-not $canonical) { Fail "'$StoreCity, $st' is not a known US place." }
+    Write-Output "$canonical, $st"
+    exit 0
+}
+
 # ── -PrintSlug: report the proposed store address and exit ────────────────────
 # A utility mode, not part of imaging: it answers "what would this store's web address be?"
 # without touching a card.
@@ -804,11 +908,42 @@ if (-not $StoreName) {
         if (-not $_explicitParams.Contains('StoreCity') -and -not $StoreCity) {
             $StoreCity = (Read-Host "Store city").Trim()
         }
-        while ($StoreState -notmatch '^[A-Za-z]{2}$') {
+        while ($StoreState -notmatch '^[A-Za-z]{2}$' -or -not (Test-KnownState $StoreState.ToUpperInvariant())) {
+            if ($StoreState) {
+                if ($StoreState -notmatch '^[A-Za-z]{2}$') { Warn "State must be exactly 2 letters." }
+                else { Warn "'$($StoreState.ToUpperInvariant())' is not a US state code." }
+            }
             $StoreState = (Read-Host "Store state (2 letters)").Trim()
-            if ($StoreState -notmatch '^[A-Za-z]{2}$') { Warn "State must be exactly 2 letters." }
         }
         $StoreState = $StoreState.ToUpperInvariant()
+    }
+
+    # Check the city against the bundled US place list and adopt its spelling. The city becomes
+    # part of the web address, so a typo here is baked into the subdomain permanently. A place
+    # that is not listed is reported rather than rejected - the list is thorough but not
+    # exhaustive, and refusing a real address the file happens to miss would be worse.
+    if ($StoreCity -and $StoreState -and (Test-PlacesFileAvailable)) {
+        while ($true) {
+            $canonical = Get-CanonicalPlace (Get-PlaceKey $StoreCity) $StoreState
+            if ($canonical) {
+                $StoreCity = $canonical
+                Ok "Store city: $StoreCity, $StoreState (verified)"
+                break
+            }
+            Warn "'$StoreCity, $StoreState' is not in the US place list - check the spelling."
+            $suggestions = Get-PlaceSuggestions (Get-PlaceKey $StoreCity) $StoreState
+            if ($suggestions) { Write-Host ("     Nearby matches: {0}" -f ($suggestions -join ', ')) }
+            if (-not (Test-HasConsole)) {
+                Ok "Store city: $StoreCity, $StoreState (unverified)"
+                break
+            }
+            $retyped = (Read-Host "Enter the correct city, or press Enter to keep '$StoreCity'").Trim()
+            if (-not $retyped -or (Get-PlaceKey $retyped) -eq (Get-PlaceKey $StoreCity)) {
+                Ok "Store city: $StoreCity, $StoreState (kept as typed, unverified)"
+                break
+            }
+            $StoreCity = $retyped
+        }
     }
 
     # An address accepted on an earlier run is reused without asking again: it was already

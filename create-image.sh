@@ -179,6 +179,51 @@ propose_slug() {
     fi
 }
 
+# ── US city/state validation ──────────────────────────────────────────────────
+# data/us-places.tsv is generated from the US Census Gazetteer (public domain) by
+# tools/build_us_places.py. It ships with the repo so this works with no network, no API key and
+# no rate limit. A typed city is checked against it and replaced with the canonical spelling; the
+# city feeds the store's web address, so a typo there becomes a permanent part of the subdomain.
+
+place_key() {
+    # Fold a place name to the dataset's lookup key. Must agree with Get-PlaceKey in
+    # create-image.ps1 and normalize_key in tools/build_us_places.py.
+    local raw="$1" out
+    out=$(printf '%s' "$raw" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null || printf '%s' "$raw")
+    out=$(printf '%s' "$out" | tr '[:upper:]' '[:lower:]' \
+        | sed -e 's/[^a-z0-9]/ /g' -e 's/  */ /g' -e 's/^ //' -e 's/ $//')
+    # Abbreviations people use interchangeably. Space-padded rather than a word-boundary regex,
+    # which BSD sed on macOS does not support.
+    out=" $out "
+    out="${out// saint / st }"
+    out="${out// sainte / ste }"
+    out="${out// mount / mt }"
+    out="${out// fort / ft }"
+    out="${out# }"
+    printf '%s' "${out% }"
+}
+
+places_file_available() { [[ -f "$PLACES_FILE" ]]; }
+
+lookup_place() {
+    # Print the canonical spelling of city key $1 in state $2, or nothing when it is not listed.
+    places_file_available || return 0
+    awk -F'\t' -v k="$1" -v s="$2" '{sub(/\r$/, "")} $1==k && $2==s {print $3; exit}' "$PLACES_FILE"
+}
+
+state_is_known() {
+    places_file_available || return 0
+    awk -F'\t' -v s="$1" '{sub(/\r$/, "")} $2==s {found=1; exit} END {exit !found}' "$PLACES_FILE"
+}
+
+suggest_places() {
+    # Up to 5 places in the same state that look like what was typed - enough to spot a typo.
+    places_file_available || return 0
+    awk -F'\t' -v k="$1" -v s="$2" -v p="${1:0:3}" \
+        '{sub(/\r$/, "")} $2==s && (index($1,k)==1 || index(k,$1)==1 || (length(p)>=3 && index($1,p)==1)) {print $3}' \
+        "$PLACES_FILE" | sort -u | head -5 | paste -sd, - | sed 's/,/, /g'
+}
+
 has_tty() {
     # True when there is a terminal to ask questions on. Every prompt reads /dev/tty directly
     # (so it still works with stdin piped), which means a run with no terminal at all - CI, a
@@ -230,6 +275,7 @@ STORE_CITY=""
 STORE_STATE=""
 STORE_SLUG=""
 PRINT_SLUG="false"
+CHECK_PLACE="false"
 RECONFIRM_ADDRESS="false"
 SKIP_STORE_CREATE="false"
 SKIP_TEST_PRINT="false"
@@ -279,6 +325,8 @@ Usage: ./create-image.sh [options]
   --store-slug SLUG          Store web address label (skips the confirmation prompt)
   --reconfirm-address        Re-confirm the store web address even when the saved one
                              still applies (normally it is only asked for once)
+  --check-place              Print the canonical spelling of --store-city/--store-state
+                             and exit (no image work)
   --print-slug               Print the proposed store address and exit (no image work)
                              If set, a public store page is created when the admin accepts the station.
   --skip-store-create        Suppress public store page creation (default: off)
@@ -336,6 +384,7 @@ while [[ $# -gt 0 ]]; do
         --store-slug)          STORE_SLUG="$2";    _explicit+=(StoreSlug);         shift 2 ;;
         --reconfirm-address)   RECONFIRM_ADDRESS="true";                            shift   ;;
         --print-slug)          PRINT_SLUG="true";                                   shift   ;;
+        --check-place)         CHECK_PLACE="true";                                  shift   ;;
         --skip-store-create)   SKIP_STORE_CREATE="true"; _explicit+=(SkipStoreCreate); shift ;;
         --skip-test-print)     SKIP_TEST_PRINT="true"; _explicit+=(SkipTestPrint); shift   ;;
         --lcd-display)         LCD_DISPLAY="true";     _explicit+=(LcdDisplay);     shift   ;;
@@ -356,6 +405,18 @@ FULL_MODE=false
 [[ "$SKIP_FLASH" == "true" ]] && FULL_MODE=true
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RESET_DEFAULTS="${RESET_DEFAULTS:-false}"
+PLACES_FILE="$SCRIPT_DIR/data/us-places.tsv"
+
+# ── --check-place: report the canonical spelling of a city/state and exit ─────
+if [[ "$CHECK_PLACE" == "true" ]]; then
+    [[ -n "$STORE_CITY" && -n "$STORE_STATE" ]] || fail "--check-place needs --store-city and --store-state"
+    STORE_STATE=$(printf '%s' "$STORE_STATE" | tr '[:lower:]' '[:upper:]')
+    state_is_known "$STORE_STATE" || fail "'$STORE_STATE' is not a US state code."
+    _canonical=$(lookup_place "$(place_key "$STORE_CITY")" "$STORE_STATE")
+    [[ -n "$_canonical" ]] || fail "'$STORE_CITY, $STORE_STATE' is not a known US place."
+    printf '%s, %s\n' "$_canonical" "$STORE_STATE"
+    exit 0
+fi
 
 # ── --print-slug: report the proposed store address and exit ──────────────────
 # A utility mode, not part of imaging: it answers "what would this store's web address be?"
@@ -627,11 +688,42 @@ else
         if [[ -z "$STORE_CITY" ]] && ! _was_explicit StoreCity; then
             STORE_CITY=$(prompt_line "Store city" "")
         fi
-        while [[ ! "$STORE_STATE" =~ ^[A-Za-z]{2}$ ]]; do
+        while [[ ! "$STORE_STATE" =~ ^[A-Za-z]{2}$ ]] || ! state_is_known "$(printf '%s' "$STORE_STATE" | tr '[:lower:]' '[:upper:]')"; do
+            if [[ -n "$STORE_STATE" ]]; then
+                if [[ ! "$STORE_STATE" =~ ^[A-Za-z]{2}$ ]]; then
+                    warn "State must be exactly 2 letters."
+                else
+                    warn "'${STORE_STATE^^}' is not a US state code."
+                fi
+            fi
             STORE_STATE=$(prompt_line "Store state (2 letters)" "")
-            [[ "$STORE_STATE" =~ ^[A-Za-z]{2}$ ]] || warn "State must be exactly 2 letters."
         done
         STORE_STATE=$(printf '%s' "$STORE_STATE" | tr '[:lower:]' '[:upper:]')
+    fi
+
+    # Check the city against the bundled US place list and adopt its spelling. The city becomes
+    # part of the web address, so a typo here is baked into the subdomain permanently. A place
+    # that is not listed is reported rather than rejected - the list is thorough but not
+    # exhaustive, and refusing a real address the file happens to miss would be worse.
+    if [[ -n "$STORE_CITY" && -n "$STORE_STATE" ]] && places_file_available; then
+        while true; do
+            _canonical=$(lookup_place "$(place_key "$STORE_CITY")" "$STORE_STATE")
+            if [[ -n "$_canonical" ]]; then
+                STORE_CITY="$_canonical"
+                ok "Store city: $STORE_CITY, $STORE_STATE (verified)"
+                break
+            fi
+            warn "'$STORE_CITY, $STORE_STATE' is not in the US place list - check the spelling."
+            _suggestions=$(suggest_places "$(place_key "$STORE_CITY")" "$STORE_STATE")
+            [[ -n "$_suggestions" ]] && printf '     Nearby matches: %s\n' "$_suggestions"
+            has_tty || { ok "Store city: $STORE_CITY, $STORE_STATE (unverified)"; break; }
+            _retyped=$(prompt_line "Enter the correct city, or press Enter to keep '$STORE_CITY'" "$STORE_CITY")
+            if [[ "$(place_key "$_retyped")" == "$(place_key "$STORE_CITY")" ]]; then
+                ok "Store city: $STORE_CITY, $STORE_STATE (kept as typed, unverified)"
+                break
+            fi
+            STORE_CITY="$_retyped"
+        done
     fi
 
     # An address accepted on an earlier run is reused without asking again: it was already
