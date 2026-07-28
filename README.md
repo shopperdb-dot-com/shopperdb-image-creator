@@ -90,11 +90,12 @@ Run `Get-Help .\create-image.ps1 -Full` for all parameters.
 | `-GithubPat` | *(prompted)* | GitHub access token supplied by ShopperDB |
 | `-AdminSshKeyPath` | `~\.ssh\id_ed25519.pub` | Admin public key (pass `""` to skip) |
 | `-StoreName` | *(saved or blank = none)* | Store display name, e.g. `"Steve's Wheels and Deals"` - creates a public store page when the admin accepts the station. Saved between runs; pass `""` to clear. |
-| `-StoreCity` | *(saved or blank)* | Store city - part of the store's web address. Prompted for when a store name is set. |
+| `-StoreCity` | *(saved or blank)* | Store city - part of the store's web address. Validated against the US place list and corrected to its canonical spelling. |
 | `-StoreState` | *(saved or blank)* | Store state, 2 letters - part of the store's web address. |
 | `-StoreSlug` | *(confirmed once, then saved)* | The store's web address label. Pass to set it outright and skip the confirmation prompt. Max 63 characters. |
 | `-ReconfirmAddress` | *(off)* | Ask about the store web address again even when the saved one still applies. |
 | `-PrintSlug` | *(off)* | Print the proposed store address and exit, without touching a card. |
+| `-CheckPlace` | *(off)* | Print the canonical spelling of `-StoreCity`/`-StoreState` and exit. Fails if the pair is not a known US place. |
 | `-SkipStoreCreate` | `$false` | Suppress public store page creation (for internal/test deployments). Skips the address prompts. |
 | `-SkipTestPrint` | `$false` | Skip printer test label on first provisioning run (useful before the printer is connected) |
 | `-LcdDisplay` | `$false` | Configure a 7-inch 1024x600 HDMI LCD. The Pi detects its own model on first boot and applies the matching HDMI/USB settings. Use only for units with the LCD attached, not TV/headless. |
@@ -143,11 +144,12 @@ Run `./create-image.sh --help` for the full option list.
 | `--github-pat TOKEN` | *(prompted)* | GitHub access token supplied by ShopperDB |
 | `--admin-ssh-key PATH` | `~/.ssh/id_ed25519.pub` | Admin public key (pass `""` to skip) |
 | `--store-name NAME` | *(saved or blank = none)* | Store display name - creates a public store page when the admin accepts the station. Saved between runs. |
-| `--store-city CITY` | *(saved or blank)* | Store city - part of the store's web address |
+| `--store-city CITY` | *(saved or blank)* | Store city - part of the store's web address. Validated against the US place list |
 | `--store-state ST` | *(saved or blank)* | Store state, 2 letters - part of the store's web address |
 | `--store-slug SLUG` | *(confirmed once, then saved)* | The store's web address label; skips the confirmation prompt. Max 63 characters |
 | `--reconfirm-address` | *(off)* | Ask about the store web address again even when the saved one still applies |
 | `--print-slug` | *(off)* | Print the proposed store address and exit |
+| `--check-place` | *(off)* | Print the canonical spelling of `--store-city`/`--store-state` and exit |
 | `--skip-store-create` | *(off)* | Suppress public store page creation. Skips the address prompts |
 | `--skip-test-print` | *(off)* | Skip printer test label on first provisioning run |
 | `--lcd-display` | *(off)* | Configure a 7-inch 1024x600 HDMI LCD. The Pi detects its own model on first boot and applies the matching HDMI/USB settings. Use only for units with the LCD attached, not TV/headless. |
@@ -183,6 +185,36 @@ Press Enter to accept, or type a different address:
 
 The 63-character cap is the DNS limit for a single label. When a name is too long, only the name is shortened - at a word boundary - so the city and state that distinguish two stores of the same name always survive. Nothing is shortened silently: the proposal is a suggestion until you accept it.
 
+### City and state are checked
+
+The city and state are validated against a list of every US place before the address is proposed. Casing and spacing are corrected automatically - `watertown` becomes `Watertown`, `NEW BRITAIN` becomes `New Britain` - because the city ends up in the web address and a misspelling there is stuck in the subdomain permanently.
+
+A city that is not on the list is flagged with near matches, and you decide:
+
+```
+  ** 'Watertwon, CT' is not in the US place list - check the spelling.
+     Nearby matches: Waterbury, Waterford, Watertown
+Enter the correct city, or press Enter to keep 'Watertwon':
+```
+
+It is a spell-check, not a gate. The list is thorough but not exhaustive, so a real address it happens to miss can still be used. A state that is not a real US state code *is* rejected, since there is no ambiguity there.
+
+Check a place without touching a card:
+
+```bash
+./create-image.sh --check-place --store-city watertown --store-state ct   # -> Watertown, CT
+```
+
+```powershell
+.\create-image.ps1 -CheckPlace -StoreCity watertown -StoreState ct
+```
+
+The list is `data/us-places.tsv`, built from the [US Census Gazetteer](https://www.census.gov/geographies/reference-files/time-series/geo/gazetteer-files.html) (public domain). It ships with the repo, so none of this needs a network connection, an API key or an account. Regenerate it when a new year's file is published:
+
+```bash
+uv run tools/build_us_places.py
+```
+
 **You confirm an address once.** It is saved with the store name, city and state, and every later card for that same store reuses it without asking. Changing any of those three, or passing `--reconfirm-address` / `-ReconfirmAddress`, brings the prompt back.
 
 Use `--print-slug` / `-PrintSlug` to see what address a store would get without touching a card:
@@ -197,7 +229,7 @@ Use `--print-slug` / `-PrintSlug` to see what address a store would get without 
 |-------|---------|-------------|
 | `ADMIN_SSH_KEY` | *(blank)* | Full contents of an SSH public key. Added to `authorized_keys` for the admin account; disables password-based SSH if set. |
 | `STORE_NAME` | *(blank)* | Display name for this station's public inventory page (e.g. `"Steve's Wheels and Deals"`). Use double quotes if the name contains spaces or an apostrophe. A store page is auto-created when the admin accepts the station. Leave blank to skip. |
-| `STORE_CITY` | *(blank)* | Store city, used to build the store's web address. |
+| `STORE_CITY` | *(blank)* | Store city, used to build the store's web address. Written in its canonical spelling when the scripts recognise it. |
 | `STORE_STATE` | *(blank)* | Store state, 2 letters, used to build the store's web address. |
 | `STORE_SLUG` | *(blank)* | The confirmed web address label (the part before the domain). The server uses it as given rather than deriving one, so the address is exactly what was approved at imaging time. Capped at 63 characters because it is a subdomain name. Blank means the server derives one from `STORE_NAME`. |
 | `SKIP_STORE_CREATE` | `false` | Set to `true` to suppress public store page creation entirely. The address fields are then ignored. |
@@ -223,5 +255,7 @@ uv run --group test pytest -v
 | `create-image.sh` | Mac/Linux: flash SD card and write station.conf |
 | `first_boot.sh` | First-boot script written to the boot partition during image prep |
 | `station.conf.example` | Template for the boot-partition config file |
+| `data/us-places.tsv` | US place list for offline city/state validation (from the Census Gazetteer) |
+| `tools/build_us_places.py` | Regenerates `data/us-places.tsv` from the Census source |
 | `setup.ps1` | Windows: check and install prerequisites |
 | `setup.sh` | Mac/Linux: check and install prerequisites |

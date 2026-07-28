@@ -45,6 +45,10 @@ STORE_NAME=
 # create-image.sh / create-image.ps1 fill these in and have you confirm the
 # address once. Later cards for the same store reuse the confirmed address
 # without asking again. Leave blank to let the server derive one from STORE_NAME.
+#
+# STORE_CITY is validated against a bundled list of US places and written in its
+# canonical spelling, so "watertown" is stored as "Watertown". The city becomes
+# part of the web address, where a misspelling would be permanent.
 STORE_CITY=
 STORE_STATE=
 STORE_SLUG=
