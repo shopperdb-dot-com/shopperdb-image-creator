@@ -180,6 +180,26 @@ class TestFirstBootSh:
         assert gate != -1, "first_boot.sh must call wait_for_network before fetching packages"
         assert step3 != -1 and gate < step3, "wait_for_network must run before Step 3's apt fetch"
 
+    def test_refreshes_ca_certificates_safely_before_first_https_fetch(self):
+        """first_boot.sh refreshes ca-certificates after the network gate and before Step 3.
+
+        The image's trust store can be months old (e.g. it may still trust roots the
+        2026 eMudhra distrust removed). The refresh must be upgrade-only,
+        non-interactive, and non-fatal, and must never reboot the device.
+        """
+        content = FIRST_BOOT_SH.read_text()
+        start = content.find("refresh_ca_certificates() {")
+        call = content.find("\nrefresh_ca_certificates\n")
+        gate = content.find("wait_for_network 45")
+        step3 = content.find("[3/7] Configuring GitHub credentials")
+        assert start != -1 and call != -1, "first_boot.sh must define and call refresh_ca_certificates"
+        assert gate < call < step3, "CA refresh must run after wait_for_network and before Step 3"
+        body = content[start:call]
+        assert "--only-upgrade ca-certificates" in body, "CA refresh must only upgrade the existing package"
+        assert "DEBIAN_FRONTEND=noninteractive" in body, "CA refresh must not prompt"
+        assert "abort" not in body, "a failed CA refresh must warn, not abort provisioning"
+        assert "reboot" not in body and "systemctl" not in body, "CA refresh must not reboot or restart services"
+
 
 # ═════════════════════════════════════════════════════════════════════
 # create-image.sh
