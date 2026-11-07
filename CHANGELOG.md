@@ -6,6 +6,13 @@ addresses. Technical detail for individual changes lives in the pull requests.
 The `release` job in CI publishes a GitHub Release for the version in the `VERSION` file on each
 merge to main - so bump `VERSION` and add a section here in every pull request.
 
+## 1.2.4 - 2026-11-07
+
+- CI: pinned both jobs to `runs-on: ubuntu-26.04` instead of `ubuntu-latest`, matching shopperdb.
+  GitHub had already moved `ubuntu-latest` to Ubuntu 26.04 and CI passed there, so nothing changes
+  today. The pin makes the next runner migration a deliberate change rather than a silent one, and
+  clears the label-migration notice from the job logs. No change to the tool itself.
+
 ## 1.2.3 - 2026-11-07
 
 - Security: a newly imaged station now refreshes its system CA trust store on first boot, right
