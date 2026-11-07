@@ -400,6 +400,32 @@ fi
 # the case where the boot-layer gate's timeout expired before the lease landed.
 wait_for_network 45
 
+# Refresh the system CA trust store before the first HTTPS fetch (git, GitHub, the
+# server). The OS image can be months old, and trust-store changes such as the 2026
+# eMudhra root distrust only arrive through the ca-certificates package. This runs
+# once, before provision.sh installs the scanner service, so no scanner is running
+# to interrupt. --only-upgrade never installs anything new, the package needs no
+# reboot or service restart, and a failure warns instead of aborting provisioning.
+refresh_ca_certificates() {
+    info "Refreshing CA certificates..."
+    local before after
+    before=$(dpkg-query -W -f='${Version}' ca-certificates 2>/dev/null || echo "none")
+    if sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get update -qq >/dev/null 2>&1 \
+        && sudo DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l \
+            apt-get install -y -qq --only-upgrade ca-certificates >/dev/null 2>&1; then
+        after=$(dpkg-query -W -f='${Version}' ca-certificates 2>/dev/null || echo "none")
+        if [ "$before" = "$after" ]; then
+            ok "CA certificates already current (${after})"
+        else
+            ok "CA certificates updated ${before} -> ${after}"
+        fi
+    else
+        warn "Could not refresh CA certificates - continuing with the image's trust store"
+    fi
+    return 0
+}
+refresh_ca_certificates
+
 # =====================================================================
 # STEP 3: Configure GitHub credentials
 # =====================================================================

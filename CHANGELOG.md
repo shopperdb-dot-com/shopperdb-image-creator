@@ -6,6 +6,26 @@ addresses. Technical detail for individual changes lives in the pull requests.
 The `release` job in CI publishes a GitHub Release for the version in the `VERSION` file on each
 merge to main - so bump `VERSION` and add a section here in every pull request.
 
+## 1.2.3 - 2026-11-07
+
+- Security: a newly imaged station now refreshes its system CA trust store on first boot, right
+  after the network comes up and before the first HTTPS fetch. A Pi OS image can be months old, and
+  trust-store changes such as the 2026 eMudhra root distrust only arrive through the
+  `ca-certificates` package. The step only upgrades the already-installed package, runs
+  non-interactively, needs no reboot or service restart, and finishes before the scanner service
+  is installed, so there is nothing running to interrupt. If it fails, first boot warns and carries
+  on with the image's trust store.
+- Security: cleared the advisories the dependency scan reported in the development tools.
+  `virtualenv` 21.3.1 -> 21.15.6 (PYSEC-2026-4014, CVE-2026-113714 and ten related advisories) and
+  `filelock` 3.29.0 -> 4.2.9 (CVE-2026-112907 and related), both pulled in by `pre-commit`. Other
+  dev tools refreshed: `ruff` 0.17.4, `pytest` 9.2.0, `pre-commit` 4.7.0. The tool itself has no
+  runtime Python dependencies, so nothing that ships to a station changed. pip-audit reports no
+  known vulnerabilities.
+- Tooling: pre-commit hooks updated to ruff v0.17.4 (now the `ruff-check` hook id), shellcheck-py
+  v0.11.0.1-1, and pre-commit-hooks v6.0.0. CI moved to `actions/checkout` v7 and
+  `astral-sh/setup-uv` v10.3.3, a full version tag because setup-uv no longer publishes floating
+  major tags.
+
 ## 1.2.2 - 2026-08-21
 
 - Added an MIT license. The project now ships a `LICENSE` file, so anyone can see the terms the
